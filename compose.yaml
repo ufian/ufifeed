@@ -1,0 +1,31 @@
+name: ufifeed
+services:
+  app:
+    build: .
+    image: ufifeed:${UFIFEED_IMAGE_TAG:-local}
+    init: true
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 1.0
+    mem_limit: 1g
+    stop_grace_period: 30s
+    volumes:
+      - ${UFIFEED_STATE_DIR:-.}/config:/app/config
+      - ${UFIFEED_STATE_DIR:-.}/data:/app/data
+      - ${UFIFEED_STATE_DIR:-.}/secrets:/app/secrets
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test: [CMD, ufifeed, healthcheck]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

@@ -1,40 +1,35 @@
-# Предлагаемый контракт конфигурации. Парсер приложения пока не реализован.
-# Значения расписания, ID и источников ниже — примеры, не настройки пользователя.
+# Начальные настройки. setup привяжет user_id к основному аккаунту через одноразовый код.
+# После первого запуска папка, темы, режим и расписание хранятся в SQLite
+# и меняются командами бота. Этот файл остаётся конфигурацией сервера.
 
 [owner]
 user_id = 123456789
-delivery_chat_id = 123456789
 
 [storage]
-database_path = "/app/data/ufifeed.sqlite3"
+database_path = "data/ufifeed.sqlite3"
+key_path = "secrets/data.key"
 retention_days = 30
 
 [telegram]
-# api_id, api_hash и bot_token читаются из секретов, не из этого файла.
-session_path = "/app/secrets/reader.session"
+session_path = "secrets/reader.session"
 initial_history_hours = 24
 reconcile_interval_seconds = 300
+# folder_id = 2 # Можно выбрать позднее через /folders и /folder ID.
 
 [digest]
-mode = "extractive"
-language = "ru"
 max_items = 10
-include_source_links = true
 send_when_empty = false
 
-[[sources]]
-key = "news"
-peer = "@example_channel"
-enabled = false # Включить после замены на реальный доступный источник.
-priority = 1
-include_keywords = ["релиз", "обновление"]
-exclude_keywords = ["#реклама"]
+[schedule]
+enabled = false
+timezone = "America/Los_Angeles" # Seattle
+times = ["09:00", "20:00"] # Пример: фактическое время задаётся в боте.
 
-[[schedules]]
-key = "daily"
-enabled = false # Включить после выбора времени и часового пояса.
-source_keys = ["news"]
-timezone = "America/Los_Angeles"
-times = ["09:00", "20:00"]
-window = "since_previous_slot"
-missed_runs = "coalesce"
+[ai]
+enabled = false
+# OpenAI-compatible Chat Completions, включая самостоятельно размещённые endpoints.
+base_url = "https://api.openai.com/v1"
+model = ""
+daily_call_limit = 20
+max_input_chars = 24000
+# API key — в secrets/credentials.json (ai_api_key) или переменной AI_API_KEY.

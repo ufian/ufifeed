@@ -1,0 +1,14 @@
+.git
+.venv
+.env*
+secrets
+data
+backups
+config/ufifeed.toml
+**/__pycache__
+.pytest_cache
+.ruff_cache
+*.session*
+*.db*
+*.sqlite*
+tests
