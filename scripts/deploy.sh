@@ -28,12 +28,13 @@ printf 'UFIFEED_STATE_DIR=%s\nUFIFEED_IMAGE_TAG=%s\n' "$base/state" "$revision" 
 docker compose config --quiet
 docker compose build app
 docker run --rm "ufifeed:$revision" --config config/ufifeed.example.toml check
-if [[ -f "$base/state/config/ufifeed.toml" && -f "$base/state/secrets/credentials.json" \
-   && -f "$base/state/secrets/reader.session" && -f "$base/state/secrets/data.key" ]]; then
+running_app="$(docker ps -q --filter label=com.docker.compose.project=ufifeed \
+  --filter label=com.docker.compose.service=app --filter label=com.docker.compose.oneoff=False)"
+if [[ -n "$running_app" ]]; then
   docker compose up -d app
   docker compose ps
 else
-  echo "Image ready. Initial setup and Telegram authorization are still required."
+  echo "Image ready. App was stopped; leaving it stopped. Complete auth before starting it."
 fi
 ln -sfn "$release" "$base/current"
 echo "Release prepared: $revision"

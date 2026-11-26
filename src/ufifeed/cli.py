@@ -18,6 +18,7 @@ from aiogram import Bot
 from pydantic import ValidationError
 from telethon import TelegramClient
 
+from ufifeed.authentication import AuthError, login
 from ufifeed.config import Config, Credentials
 from ufifeed.store import Store, create_key
 
@@ -99,16 +100,18 @@ def setup(config_path: Path, credentials_path: Path) -> None:
     print("Владелец привязан. Теперь выполните auth, затем запустите app и отправьте /start боту.")
 
 
-async def auth(config: Config, credentials: Credentials) -> None:
+async def auth(config: Config, credentials: Credentials, *, use_qr: bool = False) -> None:
     with session_lock(config.telegram.session_path):
         client = TelegramClient(
             str(config.telegram.session_path),
             credentials.api_id,
             credentials.api_hash.get_secret_value(),
+            flood_sleep_threshold=0,
+            request_retries=1,
+            connection_retries=2,
         )
         try:
-            # Telethon prompts for phone, verification code and 2FA in the terminal.
-            await client.start()
+            await login(client, use_qr=use_qr)
             me = await client.get_me()
             if me.bot:
                 raise CLIError("Reader must be a user account, not a bot")
@@ -123,8 +126,12 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("config/ufifeed.toml"))
     parser.add_argument("--credentials", type=Path, default=Path("secrets/credentials.json"))
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("setup", "auth", "run", "check", "healthcheck", "init-key"):
+    for command in ("setup", "run", "check", "healthcheck", "init-key"):
         commands.add_parser(command)
+    auth_command = commands.add_parser("auth", help="Authorize the reading account")
+    auth_command.add_argument(
+        "--qr", action="store_true", help="Approve login from Telegram on phone"
+    )
     backup = commands.add_parser("backup")
     backup.add_argument("destination", type=Path)
     args = parser.parse_args()
@@ -165,17 +172,18 @@ def main() -> None:
         else:
             credentials = Credentials.load(args.credentials, bot_required=args.command == "run")
             if args.command == "auth":
-                asyncio.run(auth(config, credentials))
+                asyncio.run(auth(config, credentials, use_qr=args.qr))
             else:
                 from ufifeed.app import run
 
                 with session_lock(config.telegram.session_path):
                     asyncio.run(run(config, credentials))
     except KeyboardInterrupt:
-        pass
+        print("\nВход/операция отменены.", file=sys.stderr)
+        raise SystemExit(130) from None
     except Exception as exc:
         # Never dump exception bodies/tracebacks containing secrets to terminal or Docker logs.
-        if isinstance(exc, (CLIError, FileNotFoundError, FileExistsError)):
+        if isinstance(exc, (CLIError, AuthError, FileNotFoundError, FileExistsError)):
             safe = str(exc)
         elif isinstance(exc, ValidationError):
             safe = "Invalid fields: " + ", ".join(
