@@ -2,6 +2,8 @@
 .venv
 .env*
 secrets
+codex
+.codex
 data
 backups
 config/ufifeed.toml

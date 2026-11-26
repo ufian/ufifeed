@@ -19,20 +19,20 @@ from ufifeed.timeutil import utcnow
 
 def test_selection_removes_ads_and_duplicate_posts():
     rows = [
-        {"text": "Релиз продукта", "date": "2026-11-24", "id": 1},
-        {"text": "РЕЛИЗ   продукта", "date": "2026-11-25", "id": 2},
-        {"text": "Релиз #реклама", "date": "2026-11-25", "id": 3},
-        {"text": "Погода", "date": "2026-11-25", "id": 4},
+        {"text": "Product release", "date": "2026-11-24", "id": 1},
+        {"text": "PRODUCT   release", "date": "2026-11-25", "id": 2},
+        {"text": "Release #ad", "date": "2026-11-25", "id": 3},
+        {"text": "Weather", "date": "2026-11-25", "id": 4},
     ]
-    assert [row["id"] for row in select_items(rows, ["релиз"], ["#реклама"], 10)] == [1]
+    assert [row["id"] for row in select_items(rows, ["release"], ["#ad"], 10)] == [1]
 
 
 def test_html_and_emoji_parts_stay_below_telegram_limit():
     escaped = escaped_clip('<a href="bad">&🚀' * 1000, 1500)
     assert "<a" not in escaped
     assert units(escaped) <= 1500
-    entries = [escaped + "\n" + '<a href="https://t.me/source/1">Источник</a>'] * 30
-    parts = render_parts("<b>Сводка</b>", entries)
+    entries = [escaped + "\n" + '<a href="https://t.me/source/1">Source</a>'] * 30
+    parts = render_parts("<b>Digest</b>", entries)
     assert len(parts) > 1
     assert all(units(part) <= 3500 for part in parts)
 
@@ -70,7 +70,7 @@ async def test_ai_sources_filtered_before_provider_request(
                 "choices": [
                     {
                         "message": {
-                            "content": '{"items":[{"text":"Краткий итог","refs":[1]}]}',
+                            "content": '{"items":[{"text":"Brief summary","refs":[1]}]}',
                         }
                     }
                 ]
@@ -89,7 +89,7 @@ async def test_ai_sources_filtered_before_provider_request(
         config, credentials, store, SimpleNamespace(sync_all=AsyncMock(return_value=True))
     )
     parts = await digests.build(item["date"], utcnow(), preview=True)
-    assert "Краткий итог" in parts[0]
+    assert "Brief summary" in parts[0]
     assert len(requests) == 1
     assert "allowed post" in requests[0]
     assert "forbidden" not in requests[0]
@@ -116,7 +116,7 @@ async def test_ai_rejects_unknown_citations_and_does_not_enqueue(
                     200,
                     json={
                         "choices": [
-                            {"message": {"content": '{"items":[{"text":"Итог","refs":[999]}]}'}}
+                            {"message": {"content": '{"items":[{"text":"Summary","refs":[999]}]}'}}
                         ],
                     },
                 )
@@ -136,7 +136,7 @@ async def test_ai_rejects_unknown_citations_and_does_not_enqueue(
 
 async def test_ai_permission_check_and_daily_budget(store, config, credentials):
     config.ai.enabled, config.ai.model = True, "test-model"
-    with pytest.raises(DigestError, match="AI-доступ"):
+    with pytest.raises(DigestError, match="AI access"):
         await summarize(config, credentials, store, [{"ai_allowed": False}])
     assert store.reserve_ai_call(1)
     assert not store.reserve_ai_call(1)
@@ -148,4 +148,4 @@ async def test_manual_digest_keeps_automatic_window(store, config, credentials, 
     reader = SimpleNamespace(sync_all=AsyncMock(return_value=True))
     await Digests(config, credentials, store, reader).manual()
     assert store.last_window_end() == before
-    assert store.claim()["payload"].startswith("<b>Подборка · вручную</b>")
+    assert store.claim()["payload"].startswith("<b>Highlights · preview</b>")

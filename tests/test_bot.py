@@ -61,7 +61,7 @@ async def test_setting_schedule_validates_time_and_seattle_zone(store, config, c
     reader = SimpleNamespace(sync_all=AsyncMock(return_value=True))
     controls = Controls(config, store, reader, Digests(config, credentials, store, reader))
     result = await controls.execute("/schedule", "08:00,19:30 America/Los_Angeles")
-    assert "включено" in result
+    assert "enabled" in result
     assert store.get("schedule")["times"] == ["08:00", "19:30"]
     await controls.execute("/pause", "")
     assert not store.get("schedule")["enabled"]

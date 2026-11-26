@@ -1,72 +1,74 @@
-# Развёртывание и эксплуатация
+# Deployment and operations
 
-## Целевая VM
+## VM
 
-Read-only проверка 2026-11-25: `ufian@192.168.1.99`, Ubuntu 26.04 LTS, x86_64, Docker 29.5.2, Compose v5.1.4. RAM 7.3 GiB, около 5 GiB available; диск `/` 98 GiB, свободно 77 GiB. Пользователь ufian UID/GID 1000, Docker доступен. На VM уже работают другие приложения — ufifeed использует отдельное имя Compose и не перезапускает Docker.
+Verified on 2026-11-25: `ufian@192.168.1.99`, Ubuntu 26.04 LTS, x86_64, Docker 29.5.2, Compose v5.1.4. RAM: 7.3 GiB total, about 5 GiB available at inspection; root disk: 98 GiB total, 77 GiB free. User UID/GID is 1000. Other projects already run here; ufifeed never restarts Docker globally.
 
-## Выкладка кода
+## Releases
 
 ```sh
 ./scripts/deploy.sh
 ```
 
-Скрипт требует чистого рабочего дерева, отправляет **только закоммиченные файлы** через `git archive | ssh`, собирает image `ufifeed:<Git SHA>`, проверяет Compose и запускает smoke `ufifeed check`. Личный SSH-ключ/GitHub credentials на VM не копируются. Для первого запуска нужны шаги setup/auth из README. Если основной app-контейнер уже запущен, следующий деплой выполняет `docker compose up -d app`. Остановленный сервис и одноразовые контейнеры auth не запускают приложение автоматически: наличие `.session` ещё не означает успешную авторизацию.
-
-Структура:
+The script requires a clean tree, transfers committed files using `git archive | ssh`, builds `ufifeed:<SHA>`, validates Compose, and runs a config smoke check. It updates an already running main app, but leaves a stopped app stopped. An unauthenticated `.session` file does not prove successful login. One-off auth containers do not trigger automatic startup.
 
 ```text
 /home/ufian/ufifeed/
-  current -> releases/<Git SHA>
-  releases/<Git SHA>/       # неизменяемый код + .env с путём state и image tag
+  compose                   # stable launcher resolving current on every invocation
+  current -> releases/<SHA>
+  releases/<SHA>/            # code and a generated .env with paths/image tag
   state/
-    config/ufifeed.toml     # server config; runtime-настройки хранятся в SQLite
-    data/ufifeed.sqlite3    # вместе с WAL/SHM при активном процессе
+    config/ufifeed.toml
+    data/ufifeed.sqlite3
     secrets/credentials.json
     secrets/reader.session
     secrets/data.key
+/home/ufian/.codex/auth.json # private Codex account auth, mounted only at runtime
 ```
 
-Директории создаются владельцем с umask 077. Контейнер работает UID/GID 1000, root filesystem read-only, `/tmp` tmpfs, без capabilities, Docker socket и опубликованных портов. Постоянные каталоги подключены через `${UFIFEED_STATE_DIR}`. Начальные лимиты — 1 CPU / 1 GiB RAM; это бюджет, который нужно проверить на реальной нагрузке.
+Use `/home/ufian/ufifeed/compose`, even from an old SSH shell: changing a symlink does not change a shell's existing working directory. The launcher ignores stale image/project environment overrides and selects the release's own `.env` and Compose file.
 
-## Первый запуск
+The app runs as UID/GID 1000 with a read-only root, tmpfs `/tmp`, dropped capabilities, no Docker socket, and no published ports. Runtime paths and the private Codex home are writable mounts. Initial resource budgets are 1 CPU and 1 GiB; measure real workload before changing them.
 
-В [README](../README.md) приведены точные команды `setup`, `auth`, `up`. Перед `setup` создайте выделенного бота через BotFather, перед `auth` подготовьте читающий аккаунт и собственные Telegram API credentials. Код/2FA вводятся только в вашем интерактивном терминале, не через чат разработки и не в shell arguments.
+## Authorization and bootstrap
 
-`setup` отказывается перезаписывать существующие config/credentials, генерирует отдельный ключ шифрования и привязывает получателя по одноразовой команде боту. Таймаут привязки — 5 минут. При входе `auth` требуется **пользовательский** аккаунт. При отсутствии кода доступен `auth --qr`: подтвердите вход через раздел устройств в уже авторизованном Telegram на телефоне. `auth` сообщает выбранный способ доставки и FloodWait, не запрашивая повторные коды автоматически; Ctrl+C отменяет ввод и освобождает session lock. Session lock запрещает одновременно запускать `auth` и приложение с одним session-файлом.
+See [README](../README.md) for `setup`, `auth --qr`, and startup commands. Secrets and 2FA are entered in your terminal, not in chat or shell arguments. Setup will not overwrite existing configuration. QR login must be approved by a signed-in phone using the **reader account**.
 
-После старта отправьте `/start`, выберите папку, проверьте `/sources`, получите `/digest`. Затем установите расписание в Seattle (`America/Los_Angeles`). До выбора времени оно выключено.
+The CLI reports code delivery methods and server-directed waits without repeated automatic requests. `Ctrl+C` cancels cleanly and restores terminal echo. `Ctrl+Z` suspends the Docker client; it does not terminate a waiting login container.
 
-AI provider ещё не выбран: параметры задаются в server config, ключ — в credentials JSON. Для проверки с реальной моделью нужны её endpoint, model и, при необходимости, key. Бот настраивает режим и разрешённые источники; секреты AI-сервиса через него не передаются.
+For Codex, `scripts/install_codex.py` installs version 0.172.0 from the official release and verifies its pinned SHA-256. Headless login can use device authentication or a securely transferred existing auth cache, as described in the [official auth guide](https://developers.openai.com/codex/auth/). Auth files remain private (0600) and are never committed. `codex login status` verifies the selected sign-in method; a real synthetic request verifies usable model access.
 
-## Проверка состояния
+Once the AI provider is configured, the operator can choose `Ufifeed`, set Russian as the client preference, opt its current sources into AI, and queue one initial digest using `configure` (see README). The main app must be stopped while that command uses the reader session. Start the app afterwards; the delivery worker sends the persisted outbox to the paired primary account.
+
+## Status
 
 ```sh
-ssh ufian@192.168.1.99 'cd /home/ufian/ufifeed/current && docker compose ps'
-ssh ufian@192.168.1.99 'cd /home/ufian/ufifeed/current && docker compose logs --tail 100 app'
+/home/ufian/ufifeed/compose ps
+/home/ufian/ufifeed/compose logs --tail 100 app
+/home/ufian/ufifeed/compose run --rm --interactive=false -T app status
 ```
 
-Docker healthcheck проверяет свежесть heartbeat event loop и доступность SQLite; он **не доказывает**, что все Telegram-источники доступны. Ошибки папки и источников, последнее время сверки, очередь и ошибки сводок показывает бот. Отсутствие новых сообщений в тихом канале не считается поломкой.
+`status` reports folder, language, mode, source/message counts, errors, and delivery counts without text or credentials. The bot additionally shows source issues and schedule settings. Docker health only verifies the event-loop/SQLite heartbeat, not every external source. Quiet channels are not considered broken.
 
-Критическая задача, завершившаяся неожиданно, останавливает процесс; `restart: unless-stopped` запускает его заново. Unhealthy-контейнер Docker сам не рестартует. Потерянную авторизацию исправляйте остановкой приложения и повторным `auth`. Логи ротируются (3 × 10 MiB), тела сообщений и credentials не логируются; сторонние сетевые логи отключены во избежание утечек Bot API token в URL.
+Unexpected critical-task exit terminates the process so `restart: unless-stopped` can recover it. Docker does not automatically restart an unhealthy container. Reauthorize a revoked session after stopping the app. Logs rotate at 3 × 10 MiB; network libraries are silenced to avoid leaking tokens from URLs or message content from errors.
 
-## Backup и восстановление
+## Backup and recovery
 
-Остановите приложение, затем сделайте согласованный снимок. Цель backup-команды должна находиться внутри смонтированного `data/`, чтобы контейнер мог её записать:
+Stop the app and create a consistent database backup inside a writable mount:
 
 ```sh
-cd /home/ufian/ufifeed/current
-docker compose stop app
-docker compose run --rm app backup data/backup.sqlite3
+/home/ufian/ufifeed/compose stop app
+/home/ufian/ufifeed/compose run --rm app backup data/backup.sqlite3
 ```
 
-Команда использует SQLite backup API и отказывается перезаписывать существующий файл. Скопируйте backup вместе с `state/secrets/` и `state/config/` в **отдельное зашифрованное хранилище**. Session и credentials содержат доступ к аккаунту/боту, `data.key` расшифровывает БД. Ключ должен храниться отдельно от публикуемых копий БД. Хранилище вне VM и автоматизация backup пока не настроены.
+The command uses SQLite's backup API and refuses to overwrite an existing destination. Copy the backup with matching server config, Telegram secrets, data key, and needed Codex auth to a separate encrypted private backup store. Session/auth files grant account access. The database text cannot be recovered without its matching data key. External backup storage/automation is not configured by this project.
 
-После копирования запустите `docker compose up -d app`. Не оставляйте бессрочные backup рядом с активной БД: retention приложения их не очищает. Предлагаемый срок копий — 7 дней, фактическую очистку нужно настроить у выбранного хранилища.
+Restart with `compose up -d app`. Remove expired backup copies independently; application retention does not purge backups. Seven days is a suggested backup lifetime, not an installed policy.
 
-Для восстановления остановите приложение, сохраните текущие данные, восстановите согласованные БД/config/secrets нужной версии с владельцем 1000:1000 и правами 0600, затем запустите соответствующий image. Не запускайте два экземпляра одновременно и не считайте metadata старого backup точным журналом всех фактических Telegram-отправок: перед повтором неопределённых доставок проверьте чат.
+For restore, stop the app, preserve current state, restore a consistent version of database/config/secrets with UID/GID 1000 and restricted permissions, and start a compatible image. Never run two reader instances. An old outbox backup may predate real Telegram sends; check the chat before retrying uncertain deliveries.
 
-## Обновление и откат
+## Updates and rollback
 
-Перед будущей миграцией схемы нужен backup. Текущая схема — версия 1, иной schema_version отклоняется. Откат к старому коду допустим только при совместимой БД. Каталог `releases/<SHA>` содержит `.env` с тем же state-путём и своим image tag: для отката запустите Compose из нужного release и обновите symlink `current` после успешного старта. Реестр контейнеров для этого MVP не требуется.
+Back up before future schema migrations. Schema version 1 is current. Roll back code only with a compatible database, or restore the matching snapshot. Releases retain their image tag and state paths in `.env`; start Compose from the chosen release and update `current` after a successful rollback. No registry is required.
 
-Не выполнять `docker compose down -v`, глобальный prune и перезапуск Docker ради ufifeed. Удаление старых releases/images выполняется отдельно, когда они больше не нужны для отката; deployment-скрипт ничего автоматически не удаляет.
+Never use `down -v`, global prune, or restart the Docker daemon to update ufifeed. Old releases/images are retained for deliberate cleanup and rollback.

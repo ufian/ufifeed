@@ -21,10 +21,11 @@ revision="$1"
 base="/home/ufian/ufifeed"
 release="$base/releases/$revision"
 umask 077
-mkdir -p "$base/state/config" "$base/state/data" "$base/state/secrets"
+mkdir -p "$base/state/config" "$base/state/data" "$base/state/secrets" /home/ufian/.codex
 cp "$release/config/ufifeed.example.toml" "$base/state/config/ufifeed.example.toml"
 cd "$release"
-printf 'UFIFEED_STATE_DIR=%s\nUFIFEED_IMAGE_TAG=%s\n' "$base/state" "$revision" > .env
+printf 'UFIFEED_STATE_DIR=%s\nUFIFEED_IMAGE_TAG=%s\nUFIFEED_CODEX_HOME=%s\n' \
+  "$base/state" "$revision" /home/ufian/.codex > .env
 docker compose config --quiet
 docker compose build app
 docker run --rm "ufifeed:$revision" --config config/ufifeed.example.toml check

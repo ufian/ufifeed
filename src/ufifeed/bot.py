@@ -14,33 +14,34 @@ from aiogram.types import BotCommand, LinkPreviewOptions, Message
 
 from ufifeed.config import Config, Schedule
 from ufifeed.digest import DigestError, Digests, units
+from ufifeed.language import LANGUAGES, language_code
 from ufifeed.reader import ReaderError
 from ufifeed.store import Store
 from ufifeed.timeutil import next_slot, stamp, utcnow
 
 log = logging.getLogger(__name__)
 
-HELP = """ufifeed — сводки из папки отдельного Telegram-аккаунта.
+HELP = """ufifeed — private digests from a dedicated Telegram account folder.
 
-/folders — папки читающего аккаунта
-/folder ID — выбрать папку (0 — отключить сбор)
-/sources — источники и состояние сбора
-/topics слово, фраза — темы интереса; off — все темы
-/exclude слово, фраза — исключения; off — очистить
-/schedule 09:00,20:00 America/Los_Angeles — время сводок
-/schedule — текущее расписание
-/pause /resume — выключить/включить расписание
-/digest — сводка сейчас, без изменения расписания
-/mode extractive|ai — подборка или AI-сводка
-/ai_source ID on|off — AI-доступ конкретного источника
-/status — состояние и ошибки
-/retry ID — повтор неопределённой/ошибочной доставки
-/purge ID — удалить сохранённые данные источника
+/folders — list folders in the reader account
+/folder ID — choose a folder (0 disables collection)
+/sources — sources and collection status
+/topics word, phrase — topics; off includes all topics
+/exclude word, phrase — exclusions; off clears them
+/schedule 09:00,20:00 America/Los_Angeles — digest times
+/schedule — current schedule
+/language en|ru — digest language
+/pause /resume — disable/enable scheduled digests
+/digest — preview now, without advancing the schedule
+/mode extractive|ai — excerpts or AI summaries
+/ai_source ID on|off — AI access for a source
+/status — service status and errors
+/retry ID — retry a failed or uncertain delivery
+/purge ID — delete retained source data
 
-В папку добавляйте каналы и группы явно, без категорий «все чаты» и фильтров непрочитанного.
-AI-доступ означает передачу текста настроенному AI-сервису.
-Включайте его для источников, для которых установлено подходящее основание обработки.
-Новые источники добавляются без AI-доступа.
+Use explicitly selected channels and groups, without automatic categories or unread filters.
+AI access sends source text to the configured AI service. Enable it for sources with an established
+basis for this processing. New sources have AI access disabled.
 """
 
 
@@ -94,9 +95,9 @@ class Controls:
         schedule = Schedule.model_validate(self.store.get("schedule"))
         next_due = next_slot(utcnow(), schedule.times, schedule.timezone)
         return (
-            f"Расписание: {'включено' if schedule.enabled else 'выключено'}\n"
+            f"Schedule: {'enabled' if schedule.enabled else 'disabled'}\n"
             f"{', '.join(schedule.times)} · {schedule.timezone}\n"
-            f"Ближайшее время: {next_due.astimezone(ZoneInfo(schedule.timezone)):%d.%m %H:%M %Z}"
+            f"Next slot: {next_due.astimezone(ZoneInfo(schedule.timezone)):%d.%m %H:%M %Z}"
         )
 
     async def handle(self, message: Message) -> None:
@@ -111,11 +112,11 @@ class Controls:
             text = (
                 str(exc)
                 if isinstance(exc, (ReaderError, DigestError))
-                else "Проверьте формат команды. /help"
+                else "Check the command format. /help"
             )
         except Exception as exc:
             log.warning("Control command failed: %s", type(exc).__name__)
-            text = f"Команда не выполнена: {type(exc).__name__}. Повторите позже."
+            text = f"Command failed: {type(exc).__name__}. Try again later."
         await reply(message, text)
 
     async def execute(self, command: str, argument: str) -> str:
@@ -126,45 +127,47 @@ class Controls:
             folders = await self.reader.folders()
             return (
                 (
-                    "Папки читающего аккаунта:\n"
+                    "Reader account folders:\n"
                     + "\n".join(f"{folder['id']} — {folder['title']}" for folder in folders)
-                    + "\nВыбор: /folder ID"
+                    + "\nSelect: /folder ID"
                 )
                 if folders
-                else "Папок нет. Создайте папку в читающем аккаунте."
+                else "No folders found. Create one in the reader account."
             )
         if command == "/folder":
             folder_id = int(argument)
             if folder_id < 0:
                 raise ValueError("Invalid folder")
             if folder_id and not any(f["id"] == folder_id for f in await self.reader.folders()):
-                return "Папка не найдена. Посмотрите /folders."
+                return "Folder not found. Check /folders."
             self.store.change_folder(folder_id or None)
             self.reader.wake.set()
             return (
-                "Папка выбрана, синхронизация запрошена. /status" if folder_id else "Сбор отключён."
+                "Folder selected; synchronization requested. /status"
+                if folder_id
+                else "Collection disabled."
             )
         if command == "/sources":
             sources = self.store.sources()
             return (
                 "\n".join(
                     f"{s['id']} — {s['title']} | AI: {'on' if s['ai_allowed'] else 'off'} | "
-                    f"{s['error'] or ('синхронизирован' if s['initialized'] else 'ожидание')}"
+                    f"{s['error'] or ('synced' if s['initialized'] else 'pending')}"
                     for s in sources
                 )
-                or "Источников пока нет. Выберите папку: /folders"
+                or "No sources yet. Choose a folder using /folders."
             )
         if command in {"/topics", "/exclude"}:
             key = command[1:]
             if not argument:
-                return f"{key}: {', '.join(self.store.get(key, [])) or 'нет'}"
+                return f"{key}: {', '.join(self.store.get(key, [])) or 'none'}"
             words = (
                 [] if argument == "off" else [v.strip() for v in argument.split(",") if v.strip()]
             )
             if len(words) > 50 or any(len(word) > 100 for word in words):
                 raise ValueError("Too many keywords")
             self.store.set(key, words)
-            return "Настройки сохранены."
+            return "Settings saved."
         if command == "/schedule":
             if argument:
                 parts = argument.split()
@@ -186,79 +189,96 @@ class Controls:
             schedule["enabled"] = command == "/resume"
             self.store.set("schedule", schedule)
             return self.schedule_text()
+        if command == "/language":
+            if argument:
+                try:
+                    code = language_code(argument)
+                except ValueError:
+                    return "Unsupported digest language. Use /language en or /language ru."
+                self.store.set("language", code)
+            code = self.store.get("language", "en")
+            choices = ", ".join(f"{value} ({key})" for key, value in LANGUAGES.items())
+            return (
+                f"Digest language: {LANGUAGES[code]} ({code}).\nAvailable: {choices}.\n"
+                "AI summaries use this language; extractive excerpts keep the source language."
+            )
         if command == "/digest":
             if self.digests.lock.locked():
-                return "Сводка уже готовится. Проверьте /status через минуту."
+                return "A digest is already being prepared. Check /status in a minute."
             run = await self.digests.manual()
-            return f"Сводка #{run} подготовлена и поставлена в очередь доставки."
+            return f"Digest #{run} prepared and queued for delivery."
         if command == "/mode":
             if not argument:
-                return f"Режим: {self.store.get('mode')}"
+                return f"Mode: {self.store.get('mode')}"
             if argument not in {"extractive", "ai"}:
                 raise ValueError("Invalid mode")
             if argument == "ai" and not self.config.ai.enabled:
-                return "AI-сервис ещё не настроен на сервере. Сейчас доступен extractive."
+                return (
+                    "The AI service is not configured on the server. Use extractive mode for now."
+                )
             self.store.set("mode", argument)
-            return f"Режим: {argument}. AI обрабатывает только источники с AI: on в /sources."
+            return f"Mode: {argument}. AI processes only sources marked AI: on in /sources."
         if command == "/ai_source":
             source, state = argument.split()
             source_id = int(source)
             if state not in {"on", "off"}:
                 raise ValueError("Invalid state")
             if source_id not in {s["id"] for s in self.store.sources()}:
-                return "Активный источник не найден. /sources"
+                return "Active source not found. /sources"
             with self.store.conn:
                 self.store.conn.execute(
                     "UPDATE sources SET ai_allowed=? WHERE id=?", (int(state == "on"), source_id)
                 )
             if state == "off":
                 self.store.invalidate_pending()
-            return f"AI-доступ источника {source_id}: {state}."
+            return f"AI access for source {source_id}: {state}."
         if command == "/status":
             return (
-                f"Папка: {self.store.get('folder_title', 'не выбрана')} "
+                f"Folder: {self.store.get('folder_title', 'not selected')} "
                 f"(ID {self.store.get('folder_id')})\n"
-                f"Источников: {len(self.store.sources())}\n"
-                f"Пропущено личных диалогов/ботов: {self.store.get('folder_skipped', 0)}\n"
-                f"Сверка папки: {self.store.get('folder_synced_at') or 'ещё не выполнена'}\n"
-                f"Ошибка папки: {self.store.get('folder_error') or 'нет'}\n"
-                f"Ошибка сводки: {self.store.get('digest_error') or 'нет'}\n"
-                f"Режим: {self.store.get('mode')}\n"
-                f"Очередь: {self.store.delivery_status()}\n"
-                f"Проблемные доставки: {self.store.delivery_issues()}\n" + self.schedule_text()
+                f"Sources: {len(self.store.sources())}\n"
+                f"Skipped personal dialogs/bots: {self.store.get('folder_skipped', 0)}\n"
+                f"Skipped protected sources: {self.store.get('folder_protected', 0)}\n"
+                f"Folder sync: {self.store.get('folder_synced_at') or 'not yet completed'}\n"
+                f"Folder error: {self.store.get('folder_error') or 'none'}\n"
+                f"Digest error: {self.store.get('digest_error') or 'none'}\n"
+                f"Mode: {self.store.get('mode')}\n"
+                f"Digest language: {self.store.get('language', 'en')}\n"
+                f"Queue: {self.store.delivery_status()}\n"
+                f"Delivery issues: {self.store.delivery_issues()}\n" + self.schedule_text()
             )
         if command == "/retry":
             parts = argument.split()
             if not parts:
-                return "Используйте /retry ID. Номера проблемных доставок — в /status."
+                return "Use /retry ID. Delivery issue IDs are listed in /status."
             item_id = int(parts[0])
             if len(parts) != 2 or parts[1] != "confirm":
                 return (
-                    f"При неизвестном результате повтор может создать дубль. "
-                    f"Для повтора: /retry {item_id} confirm"
+                    f"Retrying an unknown result may create a duplicate. "
+                    f"To retry: /retry {item_id} confirm"
                 )
-            return (
-                "Повтор поставлен в очередь."
-                if self.store.retry(item_id)
-                else "Доставка не найдена."
-            )
+            return "Retry queued." if self.store.retry(item_id) else "Delivery not found."
         if command == "/purge":
             parts = argument.split()
             if not parts:
-                return "Используйте /purge ID. Номера источников — в /sources."
+                return "Use /purge ID. Source IDs are listed in /sources."
             source_id = int(parts[0])
             if len(parts) != 2 or parts[1] != "confirm":
                 return (
-                    "Сначала уберите источник из папки, иначе он будет собран снова. "
-                    f"Удалятся сообщения и сохранённые тексты сводок: /purge {source_id} confirm"
+                    "Remove the source from the folder first or it will be collected again. "
+                    "This deletes collected messages and stored digest text: "
+                    f"/purge {source_id} confirm"
                 )
             if source_id not in {s["id"] for s in self.store.sources(active_only=False)}:
-                return "Источник не найден."
+                return "Source not found."
             if source_id in {s["id"] for s in self.store.sources()}:
-                return "Источник ещё в папке. Сначала удалите его там и дождитесь синхронизации."
+                return (
+                    "The source is still in the folder. "
+                    "Remove it there and wait for synchronization first."
+                )
             self.store.purge(source_id)
-            return "Сохранённые сообщения и тексты сводок удалены."
-        return "Неизвестная команда. /help"
+            return "Stored messages and digest text deleted."
+        return "Unknown command. /help"
 
 
 async def deliver_one(bot: Bot, store: Store, owner_id: int) -> bool:
@@ -296,15 +316,16 @@ async def set_commands(bot: Bot) -> None:
         [
             BotCommand(command=command, description=description)
             for command, description in [
-                ("digest", "Сводка сейчас"),
-                ("status", "Состояние"),
-                ("folders", "Выбрать папку"),
-                ("sources", "Источники"),
-                ("topics", "Темы"),
-                ("schedule", "Расписание"),
-                ("pause", "Приостановить сводки"),
-                ("resume", "Возобновить сводки"),
-                ("help", "Все команды"),
+                ("digest", "Digest now"),
+                ("status", "Status"),
+                ("folders", "Choose a folder"),
+                ("sources", "Sources"),
+                ("topics", "Topics"),
+                ("schedule", "Schedule"),
+                ("language", "Digest language"),
+                ("pause", "Pause digests"),
+                ("resume", "Resume digests"),
+                ("help", "All commands"),
             ]
         ]
     )

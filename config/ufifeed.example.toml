@@ -1,6 +1,6 @@
-# Начальные настройки. setup привяжет user_id к основному аккаунту через одноразовый код.
-# После первого запуска папка, темы, режим и расписание хранятся в SQLite
-# и меняются командами бота. Этот файл остаётся конфигурацией сервера.
+# Initial settings. setup pairs owner.user_id using a one-time bot command.
+# After bootstrap, the folder, topics, language, mode and schedule live in SQLite
+# and are configured in the bot. This file remains the server configuration.
 
 [owner]
 user_id = 123456789
@@ -14,22 +14,27 @@ retention_days = 30
 session_path = "secrets/reader.session"
 initial_history_hours = 24
 reconcile_interval_seconds = 300
-# folder_id = 2 # Можно выбрать позднее через /folders и /folder ID.
+# folder_id = 2 # Choose later with /folders and /folder ID.
 
 [digest]
 max_items = 10
 send_when_empty = false
+# Select the digest language in the bot: /language en or /language ru.
 
 [schedule]
 enabled = false
 timezone = "America/Los_Angeles" # Seattle
-times = ["09:00", "20:00"] # Пример: фактическое время задаётся в боте.
+# Example only: choose actual delivery times in the bot.
+times = ["09:00", "20:00"]
 
 [ai]
 enabled = false
-# OpenAI-compatible Chat Completions, включая самостоятельно размещённые endpoints.
+provider = "chat-completions" # Or "codex" to use the authenticated CLI account.
+# OpenAI-compatible Chat Completions, including self-hosted endpoints.
 base_url = "https://api.openai.com/v1"
 model = ""
+codex_path = "/usr/local/bin/codex"
+timeout_seconds = 180
 daily_call_limit = 20
 max_input_chars = 24000
-# API key — в secrets/credentials.json (ai_api_key) или переменной AI_API_KEY.
+# API key: secrets/credentials.json (ai_api_key) or the AI_API_KEY environment variable.

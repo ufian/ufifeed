@@ -73,12 +73,12 @@ def test_switching_folder_invalidates_queued_private_content(store, item):
 
 
 def test_reopening_database_preserves_unsent_payload_and_settings(store, config, item):
-    store.set("topics", ["важное"])
+    store.set("topics", ["important"])
     store.enqueue("slot", item["date"], utcnow(), "extractive", ["private"], advance=True)
     reopened = Store.open(config)
     try:
         reopened.bootstrap(config)
-        assert reopened.get("topics") == ["важное"]
+        assert reopened.get("topics") == ["important"]
         assert reopened.claim()["payload"] == "private"
     finally:
         reopened.close()

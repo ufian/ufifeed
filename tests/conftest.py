@@ -43,4 +43,4 @@ def store(config):
 
 @pytest.fixture
 def item():
-    return {"id": 10, "date": utcnow() - timedelta(minutes=10), "text": "Важный релиз"}
+    return {"id": 10, "date": utcnow() - timedelta(minutes=10), "text": "Important release"}

@@ -12,10 +12,13 @@ services:
     cpus: 1.0
     mem_limit: 1g
     stop_grace_period: 30s
+    environment:
+      CODEX_HOME: /app/codex
     volumes:
       - ${UFIFEED_STATE_DIR:-.}/config:/app/config
       - ${UFIFEED_STATE_DIR:-.}/data:/app/data
       - ${UFIFEED_STATE_DIR:-.}/secrets:/app/secrets
+      - ${UFIFEED_CODEX_HOME:-./codex}:/app/codex
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     healthcheck:

@@ -123,6 +123,7 @@ class Store:
             self._set("topics", [])
             self._set("exclude", [])
             self._set("mode", "extractive")
+            self._set("language", "en")
             self._set("started", False)
             self._set("bootstrapped", True)
 
@@ -182,7 +183,7 @@ class Store:
             {
                 "settings": {
                     key: self.get(key)
-                    for key in ("folder_id", "schedule", "topics", "exclude", "mode")
+                    for key in ("folder_id", "schedule", "topics", "exclude", "mode", "language")
                 },
                 "sources": [(s["id"], s["ai_allowed"]) for s in self.sources()],
             },

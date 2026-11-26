@@ -1,80 +1,67 @@
-# Исследование
+# Research
 
-Дата проверки: **2026-11-25**. Ниже разделены возможности API и предлагаемые проектные решения. Нагрузка, цены LLM и качество отбора ещё не измерялись.
+Checked on **2026-11-25**. The user scenario is mainly third-party channels/groups where our bot cannot be added. The subsequent implementation uses a dedicated reader account and a separate delivery bot.
 
-## 1. Как читать чужие источники
+## Access options
 
-| Способ | Доступ | История и восстановление | Вывод для ufifeed |
-| --- | --- | --- | --- |
-| Bot API | Чаты и каналы, доступные самому боту; в группах влияет privacy mode | Поток обновлений; нет общего метода чтения истории произвольного чата, обновления хранятся до 24 часов | Подходит для доставки и собственных источников |
-| Пользовательский клиент MTProto | То, что доступно авторизованному аккаунту; для приватных источников требуется доступ | Можно читать доступную историю и получать новые события | Основной вариант для чужих каналов и групп |
-| TDLib | Пользовательский клиент с теми же границами доступа | Библиотека управляет сетью, локальным состоянием и обновлениями | Альтернатива Telethon, если потребуется более полный клиент |
-| HTML-страницы `t.me/s/...` | Только часть публичного содержимого | Не являются контрактом API для надёжного сбора | Не выбирать основой проекта |
-| Ручная пересылка боту | Только присланные пользователем сообщения | Нет автоматического наблюдения за источниками | Подходит для первого ручного прототипа |
+| Approach | Access and recovery | Fit |
+| --- | --- | --- |
+| Bot API | Chats/channels accessible to the bot; group privacy mode matters; updates expire after 24 hours; no general history-reading endpoint | Delivery, controls, and sources owned by the user |
+| User MTProto client | Content accessible to an authorized account; available history and live events | Main approach for third-party sources |
+| TDLib | Full client state, networking, ordered updates, native integration | Alternative if a fuller client becomes necessary |
+| Public `t.me/s/` HTML | Only some public content; not a reliable collection API contract | Not a foundation for this service |
+| Manual forwards | Only messages explicitly submitted to the bot | Useful manual prototype, not automatic monitoring |
 
-Основания: [Bot FAQ](https://core.telegram.org/bots/faq#what-messages-will-my-bot-get), [Bot API: updates](https://core.telegram.org/bots/api#getting-updates), [Telethon: методы клиента](https://docs.telethon.dev/en/stable/modules/client.html), [TDLib](https://core.telegram.org/tdlib). Оценка пригодности способов — проектный вывод.
+Primary references: [Bot FAQ](https://core.telegram.org/bots/faq#what-messages-will-my-bot-get), [Bot API updates](https://core.telegram.org/bots/api#getting-updates), [Telethon client reference](https://docs.telethon.dev/en/stable/modules/client.html), [TDLib](https://core.telegram.org/tdlib). Suitability assessments are project decisions.
 
-Пользовательский клиент — это программа под своим Telegram-аккаунтом, часто называемая userbot. Для ufifeed он будет только читать явно выбранные источники; публикации выполняет отдельный бот. Не требуется быть администратором чужого канала. Для MVP лучше использовать источники, на которые аккаунт уже подписан: публичность канала не заменяет проверку фактического доступа, а приватная ссылка не гарантирует вступление без одобрения.
+The user client reads as the dedicated account; the bot publishes digests. Admin rights in third-party sources are unnecessary when ordinary membership provides reading access. Private sources require that account's legitimate access. Folder membership does not automatically join chats. The MVP intentionally excludes secret chats, access bypasses, bulk platform archiving, media downloads, and automatic joins.
 
-Не включать секретные чаты, автоматическое вступление по найденным ссылкам, обход доступа и массовое скачивание всей истории. Ограниченный начальный импорт нужен для первой сводки, а не для создания архива Telegram.
+## Libraries
 
-## 2. Выбор библиотек
+**Python + Telethon + aiogram** keeps the collector, controls, and scheduler in one asyncio process. Dependencies are pinned in `uv.lock`; current Telegram compatibility still needs verification on the actual sources.
 
-**Рекомендация: Python + Telethon + aiogram.** Общий asyncio позволяет начать с одного процесса. Telethon даёт чтение истории и события, aiogram — команды и отправку через Bot API. Версии нужно зафиксировать lock-файлом при реализации, проверив совместимость: опубликованная документация библиотек может отставать от новых возможностей Telegram.
+- [Telethon](https://docs.telethon.dev/en/stable/) supplies MTProto history and events.
+- [aiogram](https://docs.aiogram.dev/en/latest/) supplies Bot API controls and delivery.
+- [TDLib](https://core.telegram.org/tdlib) is the official full-client alternative, with a native integration cost.
+- [Pyrogram](https://docs.pyrogram.org/) is not selected because its documentation says it is no longer maintained.
 
-- [Telethon](https://docs.telethon.dev/en/stable/) — Python-клиент MTProto; перед выбором конкретной версии проверить вход, историю, новые сообщения и переподключение на тестовых источниках.
-- [aiogram](https://docs.aiogram.dev/en/latest/) — асинхронная библиотека Bot API. Базовых команд и `sendMessage` достаточно, новые экспериментальные функции API не нужны.
-- [TDLib](https://core.telegram.org/tdlib) — официальная библиотека клиента. Имеет смысл при требованиях к полноценному клиентскому состоянию; для небольшого Python-сервиса добавляет нативную сборку и интеграцию.
-- [Pyrogram](https://docs.pyrogram.org/) не брать за основу нового проекта: документация прямо сообщает о прекращении поддержки.
+## Authentication and recovery
 
-## 3. Авторизация и ограничения чтения
+Create your own application credentials using [Telegram API development tools](https://core.telegram.org/api/obtaining_api_id). These identify the client application and are separate from the bot token. A user account then authorizes the reader session.
 
-Собственные `api_id`/`api_hash` получают в [API development tools](https://core.telegram.org/api/obtaining_api_id). Первичный вход выполняется интерактивно, дальнейшие подключения используют сохранённую сессию. Это пользовательская авторизация, отдельная от токена бота.
+A [Telethon session](https://docs.telethon.dev/en/stable/concepts/sessions.html) contains reusable login credentials. Keep it private and outside Git/images/logs; revoke the relevant Telegram session if compromised. A dedicated account reduces the blast radius but must obtain source access independently. The session itself is not read-only: application behavior provides that boundary.
 
-[Файл сессии Telethon](https://docs.telethon.dev/en/stable/concepts/sessions.html) содержит данные для повторного входа. Он должен храниться как секрет: отдельный каталог с ограниченными правами, без Git, логов и общедоступных резервных копий. При компрометации требуется завершить соответствующую сессию в Telegram.
+Telegram chooses code delivery, including its service chat and email. SMS is not guaranteed for third-party clients, and forcing SMS is not a reliable solution. [User authorization](https://core.telegram.org/api/auth) and [QR login](https://core.telegram.org/api/qr-login) document these options. The implementation supports QR approval from an already signed-in reader phone and explains the selected code route.
 
-Один аккаунт может быть основным или отдельным для чтения. Отдельный уменьшает последствия утечки сессии, но должен самостоятельно получить доступ к каждому приватному источнику. Сессия не является технически «только для чтения»: такую границу обеспечивает код приложения.
+Honor server-directed [FloodWait](https://docs.telethon.dev/en/stable/concepts/errors.html), preserve progress, and limit concurrency. There is no promised universal safe number of channels/requests. [Deletion events](https://docs.telethon.dev/en/stable/modules/events.html#telethon.events.messagedeleted.MessageDeleted) are not guaranteed for every case, so the service cannot promise a perfect Telegram mirror.
 
-Telegram ограничивает частоту запросов. Число «безопасных каналов в минуту» заранее не обещаем: на [FloodWait](https://docs.telethon.dev/en/stable/concepts/errors.html) нужно выдерживать указанную паузу, ограничивать параллелизм и сохранять прогресс. Повторять запросы немедленно или переключать аккаунты ради обхода ограничений не нужно.
+## Defining importance
 
-События редактирования обрабатываются обновлением записи. Удаления — best effort: [документация Telethon](https://docs.telethon.dev/en/stable/modules/events.html#telethon.events.messagedeleted.MessageDeleted) предупреждает, что уведомления приходят не всегда. Поэтому обещать точную копию Telegram и гарантированное обнаружение всех удалений нельзя.
+A personal interest profile is more useful than popularity alone: topics, exclusions, source scope, and recency. Reactions/views/replies can be future signals where available; they are not equivalent to personal relevance. Evaluate the digest on a small owner-labeled sample to identify useful inclusions and missed items.
 
-## 4. Что означает «важное»
+Extractive mode uses deterministic topic filters, duplicate removal, short source excerpts, and links. It is useful without an AI provider, but does not translate content or semantically merge differently worded reports.
 
-Для начала нужен профиль интересов пользователя, а не единый рейтинг популярности:
+AI mode summarizes selected messages, groups repeated claims, and must preserve uncertainty and source references. The MVP is a single bounded request, not a full discussion/reply-chain analysis system. Input remains untrusted data; the model receives no authorization to operate Telegram or the host.
 
-- темы и ключевые слова, обязательные и исключающие выражения;
-- приоритет отдельных источников;
-- фильтрация рекламы и повторов по настраиваемым правилам;
-- для обсуждений — группировка по ответам и темам форума, ограниченное окно контекста;
-- при необходимости — реакции, просмотры и число ответов как дополнительные сигналы, если они доступны.
+## AI terms and providers
 
-Оценивать полезность следует на небольшой выборке: пользователь отмечает, что стоило включить и что пропущено. Реакции и длина сообщения сами по себе не показывают личную важность.
+[Telegram API terms §1.5](https://core.telegram.org/api/terms) incorporate [content licensing and AI terms](https://telegram.org/tos/content-licensing). Their language extends beyond model training to AI deployment. Exceptions may be granted with explicit, informed, continuing consent from all relevant users within the specified context. A subscription, public channel, or local model is not automatically such permission. This is a project risk assessment, not a legal conclusion; establish an appropriate basis for each AI-enabled source.
 
-### Подборка без LLM
+The implementation keeps AI off by default and requires explicit source opt-in before either provider receives content. Opting out stops future requests and invalidates pending digest payloads. Ordinary excerpts must also respect applicable content rights.
 
-Сначала отбор по правилам, удаление точных дублей и группировка по источнику/теме. Результат: короткий фрагмент исходного текста и ссылка. Такой режим не требует модели и оплаты токенов, но хуже объединяет разные формулировки одной новости и не пересказывает длинные дискуссии. Это самостоятельный полезный MVP, а не полноценная смысловая сводка.
+Supported providers:
 
-### Сводка с LLM
+- OpenAI-compatible Chat Completions, with server-side endpoint/model/key configuration.
+- Authenticated Codex CLI, explicitly requested by the user. The [official headless auth guide](https://developers.openai.com/codex/auth/) documents auth-cache transfer; [non-interactive execution](https://developers.openai.com/codex/noninteractive/) documents structured outputs and account-backed automation. Runs are ephemeral and text-only, with tools disabled and auth stored privately.
 
-Технически: отобрать материал → разбить по темам и размеру → получить структурированные пункты → объединить → проверить ссылки и исходные ID → отправить. Каждый тезис должен ссылаться на сообщения, а результат различать факт, мнение и неподтверждённое сообщение. Не выдавать слова участников чата за проверенные сведения.
+Client digest language is selected with `/language`; English application code does not imply English-only output. The first deployment uses the owner's requested/conversational preference, and subsequent changes are made in the bot.
 
-Есть существенное условие использования: [Telegram API Terms §1.5](https://core.telegram.org/api/terms) отсылают к [Content Licensing: Large Language Models and AI](https://telegram.org/tos/content-licensing). Ограничения включают deployment AI, а исключения могут предоставляться при явном, информированном и продолжающемся согласии всех соответствующих пользователей в конкретном контексте. **Вывод для проекта:** нельзя предполагать, что запрет касается лишь обучения или что локальная модель автоматически решает вопрос. Для чужих каналов согласия подписчика или администратора может быть недостаточно. Применимость исключения нужно установить до включения LLM; этот документ не является юридическим заключением.
+HTTP costs depend on input/output tokens and the chosen provider's rates. Codex uses the signed-in account's available limits. The app caps input size and daily attempts, not provider currency spend. Provider errors are visible and do not silently switch backends.
 
-Предлагаемая граница реализации: по умолчанию `extractive`; AI-обработка не включается глобально. При наличии подходящего основания — отдельный список разрешённых источников, проверяемый до передачи данных любому AI-компоненту, включая embeddings, классификацию, OCR и распознавание речи. Отзыв основания останавливает обработку и запускает удаление связанных данных. Обычная подборка также должна учитывать права на контент и условия его использования.
+## Delivery and MVP scope
 
-Сообщения — недоверенный ввод. Модели не выдаются инструменты, токены, доступ к сессии и возможность исполнять инструкции из сообщений. Структура результата валидируется; URL формирует приложение из известных источников, а не принимает произвольные ссылки модели.
+The owner opens/pairs the bot before delivery. Long polling works behind NAT without inbound HTTPS. [sendMessage](https://core.telegram.org/bots/api#sendmessage) limits text to 4096 characters after entity parsing; the application uses a conservative 3500 UTF-16-unit HTML bound, escapes text, and persists part-level send state. Rate-limit rejections honor [retry_after](https://core.telegram.org/bots/api#responseparameters).
 
-Стоимость LLM зависит от объёма, модели и числа повторов: `входные токены × тариф входа + выходные токены × тариф выхода`. Результаты промежуточной обработки можно кешировать по версии текста и конфигурации. Нужны дневной бюджет и явное сообщение об исчерпании; тарифы и провайдера сейчас не выбираем. Облачный сервис означает передачу текста третьей стороне, локальный требует отдельного замера ресурсов и качества.
+Construct original-message URLs using [Telegram deep-link formats](https://core.telegram.org/api/links). Private links still require destination-account membership; ordinary groups may have no universal link. Private source material is delivered only to the paired owner's private chat.
 
-## 5. Доставка
-
-Бот получает команды и отправляет сводки через Bot API. Для личной доставки владелец сначала открывает бота и отправляет `/start`. Для группы нужны соответствующие права, для публикации в канал — права на публикацию. На VM за NAT подходит long polling: входящий HTTPS и домен для MVP не нужны.
-
-У [sendMessage](https://core.telegram.org/bots/api#sendmessage) ограничение 4096 символов после разбора entities. Делить сводку по пунктам, экранировать HTML, сохранять номер каждой отправленной части. При ограничении частоты учитывать [retry_after](https://core.telegram.org/bots/api#responseparameters).
-
-Ссылка на публичное сообщение имеет вид `https://t.me/<username>/<message_id>`, на сообщение приватного канала/супергруппы — `https://t.me/c/<channel_id>/<message_id>` с корректно преобразованным ID. Получателю нужен доступ; для обычной группы универсальной ссылки может не быть. Синтаксис: [официальные deep links](https://core.telegram.org/api/links). Приватное содержимое по умолчанию доставляется только владельцу в личный чат.
-
-## 6. Решение по MVP
-
-Начать с доступных аккаунту чужих источников, одного получателя и текстовых подборок по расписанию. Проверить полезность отбора, восстановление после простоя и сохранность сессии. Затем решать вопрос смысловых сводок для конкретных допустимых источников. Не нужны на первом этапе: Redis, очередь Celery, Kubernetes, векторная БД, веб-панель, скачивание видео и локальная большая модель.
+One Docker app with SQLite is sufficient for the initial personal workload. Redis, Celery, Kubernetes, a vector database, a web UI, video processing, and a local large model are not needed for this MVP. The [architecture](architecture.md) documents actual guarantees and remaining limits.

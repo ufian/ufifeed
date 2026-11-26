@@ -1,70 +1,75 @@
-# Архитектура MVP
+# Architecture
 
-Реализовано в Python 3.13: Telethon, aiogram, SQLite, один процесс с задачами asyncio. Два пользовательских контекста: отдельный аккаунт читает источники, основной управляет ботом и получает сводки в личный чат.
+Python 3.13, Telethon, aiogram, SQLite, one application process with asyncio tasks. The reader account and bot owner are separate. Source code and controls are English; digest language is persisted as a bot-selected client preference.
 
 ```mermaid
 flowchart LR
-    F[Папка читающего аккаунта] --> R[Telethon collector]
-    R --> DB[(SQLite: сообщения и прогресс)]
-    U[Основной аккаунт] -->|Команды в личном чате| B[Бот / aiogram]
-    B --> S[Настройки в SQLite]
-    S --> D[Расписание и сборка сводки]
+    F[Reader account folder] --> R[Telethon collector]
+    R --> DB[(SQLite messages and cursors)]
+    U[Primary account] -->|Private commands| B[aiogram bot]
+    B --> S[Persisted settings]
+    S --> D[Schedule and digest builder]
     DB --> D
-    D --> O[Зашифрованный outbox]
+    D --> AI[Optional Codex or HTTP AI backend]
+    AI --> O[Encrypted outbox]
+    D --> O
     O --> B
-    B -->|Сводка| U
+    B -->|Digest| U
 ```
 
-## Папка и чтение
+## Membership and collection
 
-`/folders` показывает папки **читающего аккаунта**, `/folder ID` сохраняет выбор в БД. Через `messages.getDialogFilters` читаются явно включённые и закреплённые peers, применяются исключения. API папок описан в [официальной документации](https://core.telegram.org/api/folders). Автоматическое вступление в чаты не выполняется.
+`messages.getDialogFilters` supplies explicit included/pinned peers and exclusions. See [Telegram folder documentation](https://core.telegram.org/api/folders). Collection never automatically joins chats. Personal dialogs, bots, and protected sources are skipped. Dynamic categories and unread/muted/archive filters are intentionally unsupported.
 
-Сверка состава происходит каждые 300 секунд по умолчанию и перед каждой сводкой. Только после успешного разрешения всех peers состав применяется транзакционно. Удалённые источники выключаются; добавленные начинают с последних 24 часов. Возвращённый источник проходит начальный импорт заново. При изменении состава неотправленные тексты сводок аннулируются, чтобы не доставлять устаревший набор источников. Уже выполняющийся сетевой запрос отменить задним числом нельзя.
+Folder membership changes are applied atomically after all peers resolve. Removed sources are disabled; new/re-added sources import the latest 24 hours and start with AI access off. Membership changes invalidate unsent digest payloads. A network request already in flight cannot be retracted.
 
-Личные диалоги/боты пропускаются. Папки с категориями contacts/non_contacts/groups/broadcasts/bots и фильтрами exclude_read/exclude_muted/exclude_archived отклоняются с объяснением. Это осознанное ограничение MVP: список источников должен зависеть от явного выбора пользователя.
+Each source has its own history cursor. Live events upsert messages but never advance that cursor. Recovery scans forward to a snapshot of the latest ID, committing pages of 100 inspected messages with the cursor in one transaction. A crash repeats an upsert rather than skipping the middle of the range. An empty initial time window still advances to the snapshot ID, preventing accidental full-history import next time.
 
-Для каждого источника сохраняется независимый history cursor. Live-события делают upsert сообщений, **не продвигая cursor**. Восстановление читает доступную историю по возрастанию до снимка последнего ID; страницы по 100 просмотренных сообщений и cursor фиксируются одной транзакцией. Сбой между страницами приводит к повторному безопасному upsert, а не к пропуску. Даже если за последние 24 часа сообщений нет, cursor устанавливается в последний доступный ID: второй запуск не начнёт импорт всей старой истории.
+Edits replace message text. The latest 100 messages are reread for recent offline edits; older offline edits and every deletion cannot be guaranteed. Deletion events without an identifiable source are not guessed. Text/captions, UTC timestamps, reply IDs, and topic IDs are retained; media files are not downloaded and reply-chain clustering is not yet implemented.
 
-События правок заменяют текст. Дополнительно перечитываются последние 100 сообщений для свежих правок, пропущенных офлайн. Удаления по событиям помечаются и исключаются; все удаления и старые правки после долгого простоя не гарантируются. Потерянные события удаления, особенно обычных групп без chat ID, не угадываются.
+`FloodWait` pauses collection without blocking bot controls or delivery of completed digests. Failed source synchronization prevents the scheduled window from advancing. Partial digests and later supplements are not implemented yet; windows coalesce after recovery.
 
-Сохраняются текст/подписи, UTC-время, ID ответа/темы. Файлы не скачиваются, группировка обсуждений по цепочкам ответов пока не реализована. Защищённые и исчезающие сообщения исключаются. `FloodWait` сохраняет паузу коллектора, не блокируя работу бота и отправку готовых сводок.
+## Selection, language, and AI
 
-## Отбор и AI
+Extractive selection applies case-insensitive exclusions, then topics. Empty topics match everything. Texts equal after whitespace/case normalization are deduplicated. Ranking uses the number of topic matches, then recency. Up to 5000 latest messages are considered per window; capped windows are labeled. The default digest has at most 10 items.
 
-В режиме `extractive` ключевые слова ищутся без учёта регистра, исключения применяются первыми. Если темы пусты, подходят все сообщения. Одинаковые тексты после приведения регистра/пробелов объединяются. Сначала выбираются сообщения с большим числом совпавших тем, затем более свежие. Это простая подборка фрагментов, а не смысловое ранжирование. В одном окне рассматриваются максимум 5000 последних сообщений; при достижении лимита сводка сообщает об ограничении. По умолчанию выводится до 10 пунктов.
+`/language en|ru` persists a client preference. English is the fallback for an older database without this field. Translated digest labels live in locale JSON resources, outside application logic. Extractive text remains in its original language; AI instructions select the client's requested output language. Changing language/settings during an in-flight build prevents queuing a stale result.
 
-В режиме `ai` **до HTTP-запроса** остаются только источники с `ai_allowed=1`. Включение на сервере и `/mode ai` не включают доступ всех источников. Новые, возвращённые и переключённые через другую папку источники получают AI: off. Команда `/ai_source ID off` также аннулирует неотправленные тексты сводок.
+AI filtering occurs before requests: only `ai_allowed=1` sources enter either backend. Server enablement and `/mode ai` do not grant all sources access. `/ai_source ID off` invalidates pending payloads. The offline `configure --enable-ai-for-folder` option is an explicit administrative opt-in for the currently selected folder's active sources.
 
-OpenAI-compatible endpoint получает ограниченный набор выбранных сообщений без Telegram credentials и инструментов. Он возвращает JSON с тезисами и числовыми refs. Приложение проверяет схему и наличие refs во входе, отклоняет произвольные URL; ссылки строятся по известным peer/message ID. Это проверка структуры и происхождения ссылок, **не проверка истинности или полноты тезисов модели**.
+Backends:
 
-Ограничения: один AI-запрос на сводку, до `max_input_chars` символов совокупного входного материала, до 5000 символов отдельного исходного текста, до 2500 выходных токенов. Это MVP без многоэтапного сжатия и embeddings. Ограничение `daily_call_limit` учитывает попытки, в том числе неуспешные; сброс по UTC. Денежный бюджет нужно дополнительно ограничивать у провайдера. Ошибка не запускает скрытую отправку в другой AI-сервис и не продвигает окно.
+- `chat-completions`: a configured compatible endpoint receives bounded messages and returns JSON.
+- `codex`: the authenticated CLI receives the prompt over stdin, uses a temporary working directory, and returns schema-constrained JSON. User/project configuration, shell, browser, plugins, agents, and other tools are disabled. Runs use `--ephemeral` and a read-only sandbox. Unexpected tool activity is rejected; timeout/cancellation kills the process group. Auth refresh state persists in the mounted private Codex home.
 
-Тексты и названия источников экранируются как HTML. Части ограничиваются консервативно 3500 UTF-16 units исходного HTML, ниже лимита `sendMessage`. Длинные фрагменты сокращаются с многоточием; ссылка позволяет открыть полный оригинал, если основной аккаунт имеет доступ.
+The application verifies output shape, known reference IDs, and absence of generated URLs. Links are constructed from known source/message IDs. This is provenance/structure validation, not a proof of factual accuracy. Input messages remain untrusted data, never instructions for operating the VM.
 
-## Расписание и доставка
+One AI request is made per digest, within daily-attempt and input-size limits. Failed attempts count. Individual message input is truncated at 5000 characters; aggregate material is bounded by `max_input_chars`. The HTTP backend requests at most 2500 output tokens; Codex uses the constrained output schema and request timeout. There is no multi-stage compression or embedding store yet.
 
-Настройки папки, тем, исключений, режима и расписания сохраняются в `meta` SQLite. TOML задаёт начальные значения только при первом bootstrap; серверные параметры, owner ID и AI endpoint читаются при каждом старте. Изменения владельца в TOML требуют рестарта; обычные настройки делаются в боте.
+## Scheduling and outbox
 
-Один daily schedule поддерживает до 12 времён в IANA timezone. Seattle — `America/Los_Angeles`. При весеннем скачке несуществующее локальное время переносится на первую допустимую минуту; при осеннем повторе выполняется первый fold один раз. Поздний запуск объединяет пропущенные окна до последнего наступившего слота.
+One daily schedule supports up to 12 wall-clock times in an IANA zone. Seattle uses `America/Los_Angeles`. Spring-forward gaps move to the first valid minute; fall-back repeats run once using the first fold. Missed windows coalesce up to the latest due slot.
 
-Окно полуоткрытое `[previous_end, scheduled_end)`. `/schedule ...` начинает новое расписание с текущего момента, `/resume` сохраняет предыдущую границу для догоняющей сводки. `/digest` — ручной preview за период от последней границы, ограниченный начальным окном импорта; автоматическую границу не меняет. После очень долгого простоя доступны только данные в пределах retention.
+Windows are half-open `[previous_end, scheduled_end)`. `/schedule ...` starts at the current moment; `/resume` preserves the prior boundary for catch-up. `/digest` is a preview, bounded by the initial import window, and does not advance scheduled boundaries. Very long downtime is limited by retention.
 
-Перед подготовкой все активные источники сверяются. Если источник недоступен, **автоматическая сводка ждёт восстановления**, ошибка видна в `/sources` и `/status`. Частичные сводки и отдельные дополнения пока не реализованы. После восстановления пропущенные окна объединяются. Пустой результат по умолчанию не отправляется, но окно продвигается. При ошибке AI окно остаётся прежним.
+All active sources synchronize before a digest. Unique `runs.slot` keys prevent duplicate generation. Run metadata, encrypted outbox parts, and window advancement commit atomically. Empty scheduled digests advance the window but are silent by default. AI failures leave the boundary unchanged and appear in `/status`.
 
-`runs.slot` уникален. Run, зашифрованный outbox и продвижение границы фиксируются в одной транзакции. Готовый текст не генерируется заново при повторе доставки. Настройки/состав источников перепроверяются после сетевых ожиданий, чтобы не поставить в очередь результат с уже изменёнными настройками.
+Parts are sent sequentially. Confirmed `sent` parts are never automatically repeated. Known rate-limit rejection honors `retry_after`; permanent rejection becomes `failed`. A timeout/uncertain result becomes `unknown`, as does interrupted `sending` after restart. Later parts of that run wait. `/retry ID confirm` deliberately accepts a possible duplicate; exactly-once delivery is not promised.
 
-Части отправляются последовательно; сохранённые `sent` не повторяются. При известном отказе по частоте учитывается `retry_after`; при permanent bad request/forbidden статус `failed`. Timeout/неизвестный результат — `unknown`, без автоматического повтора. После перезапуска `sending` тоже становится `unknown`; следующие части этого run ждут решения владельца. `/retry ID confirm` явно допускает возможный дубль. Exactly-once через Bot API не обещается.
+`configure --queue-digest` queues an idempotent initial preview for the named folder before startup. The operator explicitly authorizes delivery to the paired owner. No message is sent to any other destination.
 
-## Хранение и безопасность
+## Storage and access
 
-SQLite WAL, короткие синхронные транзакции в одном потоке event loop, один экземпляр на session/bot token. Тексты сообщений и outbox зашифрованы Fernet; key отдельно в `secrets/data.key`. Технические метаданные, темы и названия источников остаются читаемыми. Session и credentials — файлы с ограниченными правами, они не шифруются Fernet.
+SQLite WAL with short transactions on the event-loop thread. A filesystem session lock prevents concurrent reader/auth/configure processes. Operational `status` uses a read-only database connection. Metadata schema version is currently 1; language/settings additions need no table migration.
 
-По умолчанию тексты очищаются каждые ~час по retention 30 дней; минимальные ключи run остаются для идемпотентности. Истёкшие outbox payload удаляются, повтор невозможен. `/purge` отключённого источника удаляет сообщения и все сохранённые тексты outbox консервативно: одна сводка могла объединить несколько источников. Уже доставленные сообщения и резервные копии эта команда не удаляет.
+Fernet encrypts message text and outbox payloads. Its key is separate in `secrets/data.key`. Technical metadata and settings remain plaintext. Telegram sessions, bot credentials, and Codex auth cache are private files, never image layers or Git content. The Codex executable is pinned and verified against the official archive SHA-256.
 
-Владелец привязывается одноразовым случайным кодом при `setup`, затем middleware проверяет числовой user ID и private chat ID. Username не является проверкой доступа. Секреты вводятся в терминале VM, в Telegram-командах не принимаются. Сессия чтения даёт права аккаунта: режим «только читать» обеспечивается приложением, не ограниченной Telegram-сессией.
+Hourly cleanup expires text after 30 days by default, retaining minimal run keys for idempotency. `/purge` removes a disabled source's messages and all retained outbox text conservatively because summaries can combine sources. Delivered bot messages and external backups are outside this deletion path.
 
-## Проверки и ограничения приёмки
+Owner pairing uses a one-time random bot command. Middleware checks numeric user ID and private chat ID; usernames are not authorization. All normal client settings are persisted in SQLite. TOML controls server paths/provider settings and only seeds client settings at first bootstrap.
 
-Автотесты покрывают cursor/live race, пустой начальный импорт, правки/upsert, шифрование payload, неверный ключ, membership, retention, окна/DST, остановку при неудачном сборе, авторизацию команд, timeout/retry доставки, AI-фильтрацию до HTTP и недопустимые refs. Docker smoke проверяет установку зафиксированных зависимостей и чтение TOML на Linux x86_64.
+## Verification
 
-Реальная авторизация, доступ к папке, фактическая доставка и выбранная модель требуют credentials пользователя. До их ввода это подготовленный и протестированный сервис, а не подтверждённый end-to-end запуск с Telegram.
+Tests cover collection/live races, empty initial imports, updates, encryption, membership changes, retention, restart-safe delivery, uncertain outcomes, schedule/DST boundaries, owner-only controls, login cancellation and QR refresh/2FA, client-selected language, and AI request/citation boundaries. Container checks verify pinned dependencies, read-only runtime storage, and packaged resources.
+
+Real reader authorization, source access, model access, and delivery are checked separately on the target VM. No test credentials are committed.

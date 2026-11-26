@@ -40,7 +40,7 @@ async def test_phone_login_explains_actual_delivery_and_never_prints_secrets(mon
     )
     await login(client, use_qr=False)
     output = capsys.readouterr().out
-    assert "служебный чат Telegram" in output
+    assert "Telegram service chat" in output
     assert "auth --qr" in output
     assert "12345" not in output and "secret-hash" not in output
     assert "2025550101" not in output
@@ -76,7 +76,7 @@ async def test_flood_wait_reports_delay_without_resending(monkeypatch):
     client = client_stub()
     client.send_code_request.side_effect = errors.FloodWaitError(None, capture=300)
     monkeypatch.setattr("ufifeed.authentication.prompt", AsyncMock(return_value="+12025550101"))
-    with pytest.raises(AuthError, match="300 секунд"):
+    with pytest.raises(AuthError, match="300 seconds"):
         await login(client, use_qr=False)
     assert client.send_code_request.await_count == 1
 
@@ -142,7 +142,7 @@ async def test_prompt_can_be_cancelled_and_reused_without_blocked_input_thread(m
 
 
 def test_unsupported_sms_route_explains_official_app_requirement():
-    with pytest.raises(AuthError, match="официального приложения"):
+    with pytest.raises(AuthError, match="official Telegram app"):
         delivery_hint(SimpleNamespace(type=types.auth.SentCodeTypeSetUpEmailRequired()))
 
 

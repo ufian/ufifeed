@@ -4,6 +4,7 @@ import json
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
@@ -65,14 +66,17 @@ class Schedule(StrictModel):
 
 class AI(StrictModel):
     enabled: bool = False
+    provider: Literal["chat-completions", "codex"] = "chat-completions"
     base_url: str = "https://api.openai.com/v1"
     model: str = ""
+    codex_path: str = "/usr/local/bin/codex"
+    timeout_seconds: int = Field(default=180, ge=30, le=600)
     daily_call_limit: int = Field(default=20, ge=1, le=1000)
     max_input_chars: int = Field(default=24000, ge=1000, le=100000)
 
     @model_validator(mode="after")
     def configured(self) -> AI:
-        if self.enabled and not self.model.strip():
+        if self.enabled and self.provider == "chat-completions" and not self.model.strip():
             raise ValueError("Set ai.model before enabling AI")
         if not self.base_url.startswith(("https://", "http://")):
             raise ValueError("AI base_url must be an HTTP URL")

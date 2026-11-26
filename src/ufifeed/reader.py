@@ -33,7 +33,7 @@ def folder_peers(folder: Any) -> list[Any]:
     )
     if any(getattr(folder, flag, False) for flag in dynamic):
         raise ReaderError(
-            "В папке нужны явно выбранные чаты, без автокатегорий и фильтров состояния."
+            "Use explicitly selected chats without automatic categories or state filters."
         )
     excluded = {utils.get_peer_id(peer) for peer in getattr(folder, "exclude_peers", [])}
     peers = [*getattr(folder, "pinned_peers", []), *getattr(folder, "include_peers", [])]
@@ -95,7 +95,7 @@ class Reader:
     async def connect(self) -> None:
         await self.client.connect()
         if not await self.client.is_user_authorized():
-            raise ReaderError("Сессия не авторизована. Выполните ufifeed auth на VM.")
+            raise ReaderError("The reader session is not authorized. Run ufifeed auth on the VM.")
         # Cache entities for private peer IDs, without joining any chats.
         async for _ in self.client.iter_dialogs():
             pass
@@ -119,15 +119,19 @@ class Reader:
         folders = await self.folders()
         selected = next((item for item in folders if item["id"] == folder_id), None)
         if selected is None:
-            raise ReaderError("Выбранная папка не найдена. Используйте /folders и /folder ID.")
+            raise ReaderError("Selected folder not found. Use /folders and /folder ID.")
         resolved = []
         entities = {}
         skipped = 0
+        protected = 0
         for peer in folder_peers(selected["filter"]):
             entity = await self.client.get_entity(peer)
             # Personal dialogs and bots are deliberately outside this MVP.
             if not isinstance(entity, (types.Channel, types.Chat)):
                 skipped += 1
+                continue
+            if getattr(entity, "noforwards", False):
+                protected += 1
                 continue
             source_id = utils.get_peer_id(entity)
             entities[source_id] = entity
@@ -151,6 +155,7 @@ class Reader:
         )
         self.store.set("folder_title", selected["title"])
         self.store.set("folder_skipped", skipped)
+        self.store.set("folder_protected", protected)
 
     async def on_message(self, event: Any) -> None:
         source_id = event.chat_id
@@ -176,7 +181,7 @@ class Reader:
         entity = self.entities.get(source_id) or await self.client.get_entity(source_id)
         if getattr(entity, "noforwards", False):
             self.store.purge(source_id)
-            raise ReaderError("Источник защищён от сохранения; сбор выключен.")
+            raise ReaderError("This source has protected content; collection is disabled.")
         started = utcnow()
         cursor = source["cursor"]
         newest = await self.client.get_messages(entity, limit=1)

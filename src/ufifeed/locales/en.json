@@ -1,0 +1,9 @@
+{
+  "extractive_title": "Highlights",
+  "ai_title": "AI summary",
+  "manual_suffix": " · preview",
+  "continued_suffix": " (continued)",
+  "window_capped": "Large window: considered the latest 5000 messages.",
+  "empty": "No matching new messages.",
+  "ai_sources_only": "Only sources with AI access enabled are included."
+}

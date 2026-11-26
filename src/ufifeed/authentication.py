@@ -52,65 +52,67 @@ async def prompt(text: str, *, secret: bool = False) -> str:
 def delivery_hint(sent) -> str:
     if not hasattr(sent, "type"):
         raise AuthError(
-            "Telegram не вернул обычный способ доставки кода. "
-            "Попробуйте auth --qr из уже вошедшего официального приложения."
+            "Telegram did not return a regular code delivery method. "
+            "Try auth --qr from an official app that is already signed in."
         )
     kind = type(sent.type).__name__
     messages = {
-        "SentCodeTypeApp": "Код отправлен в служебный чат Telegram на уже вошедших устройствах "
-        "читающего аккаунта. Это не SMS и не сообщение нашему боту.",
-        "SentCodeTypeSms": "Telegram выбрал доставку кода по SMS.",
-        "SentCodeTypeCall": "Telegram выбрал телефонный звонок с кодом.",
-        "SentCodeTypeFlashCall": "Telegram выбрал проверку телефонным звонком.",
-        "SentCodeTypeMissedCall": "Telegram выбрал проверку пропущенным звонком.",
-        "SentCodeTypeEmailCode": "Код отправлен на email для входа в Telegram.",
-        "SentCodeTypeFragmentSms": "Telegram выбрал Fragment. Используйте доступный вам "
-        "Fragment или выполните auth --qr с уже вошедшего телефона.",
+        "SentCodeTypeApp": "The code was sent to the Telegram service chat on devices signed into "
+        "the reader account. This is not an SMS or a message to our bot.",
+        "SentCodeTypeSms": "Telegram selected SMS code delivery.",
+        "SentCodeTypeCall": "Telegram selected a phone call with the code.",
+        "SentCodeTypeFlashCall": "Telegram selected flash-call verification.",
+        "SentCodeTypeMissedCall": "Telegram selected missed-call verification.",
+        "SentCodeTypeEmailCode": "The code was sent to the login email configured in Telegram.",
+        "SentCodeTypeFragmentSms": "Telegram selected Fragment. Use your available "
+        "Fragment account or run auth --qr from a phone already signed in.",
     }
     if kind in {"SentCodeTypeFirebaseSms", "SentCodeTypeSetUpEmailRequired"}:
         raise AuthError(
-            "Этот способ входа требует официального приложения Telegram. "
-            "Сначала войдите в читающий аккаунт на телефоне, затем используйте auth --qr."
+            "This login method requires an official Telegram app. "
+            "Sign into the reader account on your phone, then use auth --qr."
         )
     return messages.get(
-        kind, f"Telegram выбрал способ {kind}; если код не приходит, используйте auth --qr."
+        kind, f"Telegram selected {kind}; if the code does not arrive, use auth --qr."
     )
 
 
 async def password_login(client) -> None:
     for _ in range(3):
         password = await prompt(
-            "Пароль двухэтапной аутентификации читающего аккаунта: ", secret=True
+            "Two-step verification password for the reader account: ", secret=True
         )
         try:
             await asyncio.wait_for(client.sign_in(password=password), timeout=45)
             return
         except errors.PasswordHashInvalidError:
-            print("Пароль не подошёл. Попробуйте ещё раз.", flush=True)
-    raise AuthError("Три неверных пароля. Вход остановлен.")
+            print("Incorrect password. Try again.", flush=True)
+    raise AuthError("Three incorrect passwords. Login stopped.")
 
 
 async def code_login(client) -> None:
-    phone = await prompt("Номер ЧИТАЮЩЕГО аккаунта в международном формате (+код страны…): ")
+    phone = await prompt("READER account phone number in international format (+country code...): ")
     phone = re.sub(r"[\s()-]", "", phone)
     if not re.fullmatch(r"\+[1-9]\d{6,14}", phone):
-        raise AuthError("Нужен номер с + и кодом страны. Bot token здесь не используется.")
-    print("Запрашиваю код у Telegram…", flush=True)
+        raise AuthError(
+            "Enter a phone number starting with + and a country code. Do not enter a bot token."
+        )
+    print("Requesting a code from Telegram...", flush=True)
     sent = await asyncio.wait_for(client.send_code_request(phone), timeout=45)
     print(delivery_hint(sent), flush=True)
     if getattr(sent, "timeout", None):
         print(
-            f"Telegram указал таймаут {sent.timeout} секунд; "
-            "повтор автоматически не запрашивается.",
+            f"Telegram returned a {sent.timeout}-second timeout; "
+            "a new code will not be requested automatically.",
             flush=True,
         )
     print(
-        "Если кода нет: Ctrl+C, затем docker compose run --rm app auth --qr. "
-        "Не запускайте много запросов подряд.",
+        "If no code arrives: Ctrl+C, then run /home/ufian/ufifeed/compose run --rm app auth --qr. "
+        "Avoid repeated code requests.",
         flush=True,
     )
     for _ in range(3):
-        code = await prompt("Код (ввод скрыт): ", secret=True)
+        code = await prompt("Code (input hidden): ", secret=True)
         try:
             await asyncio.wait_for(
                 client.sign_in(
@@ -122,12 +124,10 @@ async def code_login(client) -> None:
             )
             return
         except (errors.PhoneCodeInvalidError, errors.PhoneCodeEmptyError):
-            print("Код не подошёл. Проверьте последний код для читающего аккаунта.", flush=True)
+            print("Incorrect code. Check the latest code for the reader account.", flush=True)
         except errors.PhoneCodeExpiredError:
-            raise AuthError(
-                "Код истёк. Запустите auth заново либо используйте auth --qr."
-            ) from None
-    raise AuthError("Три неверных кода. Вход остановлен.")
+            raise AuthError("The code expired. Restart auth or use auth --qr.") from None
+    raise AuthError("Three incorrect codes. Login stopped.")
 
 
 def display_qr(url: str) -> None:
@@ -140,10 +140,10 @@ def display_qr(url: str) -> None:
 
 async def qr_login(client) -> None:
     print(
-        "На телефоне переключитесь в ЧИТАЮЩИЙ аккаунт Telegram.\n"
-        "Настройки → Устройства → Подключить устройство.\n"
-        "Сканируйте QR с экрана терминала и подтвердите вход. "
-        "Не публикуйте этот QR. Ctrl+C отменяет вход.",
+        "Switch to the READER Telegram account on your phone.\n"
+        "Settings -> Devices -> Link Desktop Device.\n"
+        "Scan the QR code from this terminal and approve the login. "
+        "Do not share this QR code. Ctrl+C cancels login.",
         flush=True,
     )
     for _ in range(10):
@@ -156,21 +156,21 @@ async def qr_login(client) -> None:
             await waiting
             return
         except TimeoutError:
-            print("QR истёк. Ниже новый код:", flush=True)
+            print("The QR code expired. A new code follows:", flush=True)
         finally:
             if not waiting.done():
                 waiting.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await waiting
-    raise AuthError("Время входа по QR истекло. Повторите auth --qr.")
+    raise AuthError("QR login timed out. Run auth --qr again.")
 
 
 async def login(client, *, use_qr: bool) -> None:
     try:
-        print("Подключаюсь к Telegram…", flush=True)
+        print("Connecting to Telegram...", flush=True)
         await asyncio.wait_for(client.connect(), timeout=30)
         if await asyncio.wait_for(client.is_user_authorized(), timeout=30):
-            print("Сессия уже авторизована.", flush=True)
+            print("The session is already authorized.", flush=True)
             return
         try:
             if use_qr:
@@ -181,20 +181,22 @@ async def login(client, *, use_qr: bool) -> None:
             await password_login(client)
     except errors.FloodWaitError as exc:
         raise AuthError(
-            f"Telegram ограничил запросы. Подождите минимум {exc.seconds} секунд. "
-            "Повторные запросы сейчас не помогут."
+            f"Telegram rate-limited this request. Wait at least {exc.seconds} seconds. "
+            "Repeated requests will not help right now."
         ) from None
     except TimeoutError:
         raise AuthError(
-            "Telegram не ответил вовремя. Проверьте соединение и повторите позже."
+            "Telegram did not respond in time. Check the connection and try later."
         ) from None
     except EOFError:
         raise AuthError(
-            "Ввод закрыт. Запустите auth в интерактивном терминале через ssh -t."
+            "Input is closed. Run auth in an interactive terminal using ssh -t."
         ) from None
     except errors.ApiIdInvalidError:
-        raise AuthError("Telegram отклонил api_id/api_hash. Проверьте credentials на VM.") from None
+        raise AuthError("Telegram rejected api_id/api_hash. Check credentials on the VM.") from None
     except errors.PhoneNumberInvalidError:
-        raise AuthError("Telegram отклонил номер. Проверьте международный формат.") from None
+        raise AuthError(
+            "Telegram rejected the phone number. Check its international format."
+        ) from None
     except errors.PhoneNumberBannedError:
-        raise AuthError("Telegram сообщает об ограничении этого номера.") from None
+        raise AuthError("Telegram reports that this phone number is banned.") from None
