@@ -149,3 +149,76 @@ async def test_manual_digest_keeps_automatic_window(store, config, credentials, 
     await Digests(config, credentials, store, reader).manual()
     assert store.last_window_end() == before
     assert store.claim()["payload"].startswith("<b>Highlights · preview</b>")
+
+
+async def test_busy_chat_cannot_hide_other_sources_from_ai_input(
+    store,
+    config,
+    credentials,
+    item,
+    monkeypatch,
+):
+    import json
+    from datetime import timedelta
+
+    config.ai.enabled, config.ai.model = True, "test-model"
+    config.ai.max_input_chars = 1000
+    config.digest.max_items = 1  # Output count must not limit input coverage.
+    store.set("mode", "ai")
+    store.sync_folder(
+        [
+            {"id": -1000000000123, "title": "Busy chat"},
+            {"id": -1000000000456, "title": "Quiet channel"},
+        ],
+        item["date"] - timedelta(hours=1),
+    )
+    with store.conn:
+        store.conn.execute("UPDATE sources SET ai_allowed=1")
+    for index in range(20):
+        store.upsert_live(
+            -1000000000123,
+            {**item, "id": index + 1, "text": f"Busy {index}: " + 'quote "value" ' * 500},
+        )
+    store.upsert_live(
+        -1000000000456,
+        {
+            **item,
+            "id": 100,
+            "date": item["date"] - timedelta(minutes=30),
+            "text": 'Quiet "release" ' * 500,
+        },
+    )
+    requests = []
+
+    def handler(request):
+        data = json.loads(request.content)
+        records_json = data["messages"][1]["content"]
+        assert len(records_json) <= config.ai.max_input_chars
+        requests.extend(json.loads(records_json))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"items":[{"text":"Summary","refs":[1]}]}',
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "ufifeed.digest.httpx.AsyncClient",
+        lambda **kwargs: client(
+            transport=httpx.MockTransport(handler),
+            **kwargs,
+        ),
+    )
+    digests = Digests(
+        config, credentials, store, SimpleNamespace(sync_all=AsyncMock(return_value=True))
+    )
+    await digests.build(item["date"] - timedelta(hours=1), utcnow(), preview=True)
+    assert {record["source"] for record in requests} == {"Busy chat", "Quiet channel"}
+    assert store.get("last_ai_input")["sources"] == 2

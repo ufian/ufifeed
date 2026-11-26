@@ -244,6 +244,7 @@ class Controls:
                 f"Digest error: {self.store.get('digest_error') or 'none'}\n"
                 f"Mode: {self.store.get('mode')}\n"
                 f"Digest language: {self.store.get('language', 'en')}\n"
+                f"Last AI input: {self.store.get('last_ai_input', {})}\n"
                 f"Queue: {self.store.delivery_status()}\n"
                 f"Delivery issues: {self.store.delivery_issues()}\n" + self.schedule_text()
             )

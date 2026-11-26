@@ -44,7 +44,7 @@ Backends:
 
 The application verifies output shape, known reference IDs, and absence of generated URLs. Links are constructed from known source/message IDs. This is provenance/structure validation, not a proof of factual accuracy. Input messages remain untrusted data, never instructions for operating the VM.
 
-One AI request is made per digest, within daily-attempt and input-size limits. Failed attempts count. Individual message input is truncated at 5000 characters; aggregate material is bounded by `max_input_chars`. The HTTP backend requests at most 2500 output tokens; Codex uses the constrained output schema and request timeout. There is no multi-stage compression or embedding store yet.
+AI input selection round-robins across eligible sources rather than taking only the latest output-sized batch. Up to 200 candidates are considered, with a first-pass input share reserved per source. Actual serialized JSON size is bounded, including delimiters and escaping; the digest reports how many sources/messages entered the model. One AI request is made per digest, within daily-attempt and input-size limits. Failed attempts count. Individual message input is truncated at 5000 characters; aggregate material is bounded by `max_input_chars`. The HTTP backend requests at most 2500 output tokens; Codex uses the constrained output schema and request timeout. There is no multi-stage compression or embedding store yet.
 
 ## Scheduling and outbox
 

@@ -192,6 +192,7 @@ def status(config: Config) -> None:
                 "mode",
                 "folder_error",
                 "digest_error",
+                "last_ai_input",
             )
         }
         result["sources"] = connection.execute(
