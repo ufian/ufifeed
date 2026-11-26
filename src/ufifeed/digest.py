@@ -211,6 +211,7 @@ class Digests:
                     hours=self.config.telegram.initial_history_hours,
                 ),
             )
+            start = min(start, end)
             parts = await self.build(start, end, preview=True)
             if signature != self.store.input_signature():
                 raise DigestError("Настройки изменились во время подготовки. Повторите /digest.")
@@ -237,7 +238,10 @@ class Digests:
                 self.store.set("digest_error", "Ожидание синхронизации источников")
                 return
             # Re-check settings after network calls to respect pause/folder changes.
-            if self.store.get("schedule") != schedule.model_dump():
+            if (
+                self.store.get("schedule") != schedule.model_dump()
+                or self.store.last_window_end() != start
+            ):
                 return
             start = max(start, due - timedelta(days=self.config.storage.retention_days))
             signature = self.store.input_signature()

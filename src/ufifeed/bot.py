@@ -252,6 +252,8 @@ class Controls:
                     "Сначала уберите источник из папки, иначе он будет собран снова. "
                     f"Удалятся сообщения и сохранённые тексты сводок: /purge {source_id} confirm"
                 )
+            if source_id not in {s["id"] for s in self.store.sources(active_only=False)}:
+                return "Источник не найден."
             if source_id in {s["id"] for s in self.store.sources()}:
                 return "Источник ещё в папке. Сначала удалите его там и дождитесь синхронизации."
             self.store.purge(source_id)

@@ -50,3 +50,24 @@ async def test_pause_during_sync_prevents_sending(store, config, credentials, mo
     digests = Digests(config, credentials, store, SimpleNamespace(sync_all=pause))
     await digests.scheduled()
     assert not store.delivery_status()
+
+
+async def test_schedule_reset_during_sync_cannot_move_window_backwards(
+    store,
+    config,
+    credentials,
+    monkeypatch,
+):
+    now = datetime(2026, 11, 25, 20, tzinfo=UTC)
+    monkeypatch.setattr("ufifeed.digest.utcnow", lambda: now)
+    store.set("started", True)
+    store.set("window_end", stamp(now - timedelta(days=1)))
+    store.set("schedule", {"enabled": True, "times": ["09:00"], "timezone": "America/Los_Angeles"})
+
+    async def reset():
+        store.set("window_end", stamp(now))
+        return True
+
+    await Digests(config, credentials, store, SimpleNamespace(sync_all=reset)).scheduled()
+    assert store.last_window_end() == now
+    assert store.conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 0

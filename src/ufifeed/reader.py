@@ -229,7 +229,11 @@ class Reader:
                 self.store.set("folder_error", type(exc).__name__)
                 log.warning("Folder sync failed: %s", type(exc).__name__)
                 return False
-            okay = bool(self.store.get("folder_id"))
+            okay = bool(
+                self.store.get("folder_id")
+                and self.store.get("folder_synced_at")
+                and not self.store.get("folder_error")
+            )
             for source in self.store.sources():
                 try:
                     await self.reconcile(source)

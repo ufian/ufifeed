@@ -75,3 +75,11 @@ async def test_live_event_during_backfill_does_not_skip_middle_messages(store, c
     await reader.reconcile(store.sources()[0])
     assert store.sources()[0]["cursor"] == 20
     assert store.conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 3
+
+
+async def test_changed_folder_requires_its_own_successful_sync(store, config, credentials):
+    reader = Reader(config, credentials, store)
+    store.change_folder(3)
+    # Simulate an in-flight refresh for the previous folder noticing the change and returning.
+    reader.refresh_folder = AsyncMock(return_value=None)
+    assert not await reader.sync_all()
