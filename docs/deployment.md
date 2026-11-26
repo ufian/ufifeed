@@ -48,7 +48,7 @@ Once the AI provider is configured, the operator can choose `Ufifeed`, set Russi
 /home/ufian/ufifeed/compose run --rm --interactive=false -T app status
 ```
 
-`status` reports folder, language, mode, source/message counts, errors, and delivery counts without text or credentials. The bot additionally shows source issues and schedule settings. Docker health only verifies the event-loop/SQLite heartbeat, not every external source. Quiet channels are not considered broken.
+`status` reports folder, language, mode, source/message counts, errors, and delivery counts without text or credentials. The bot additionally shows source issues and schedule settings. Docker health uses a lightweight standard-library probe for the event-loop/SQLite heartbeat, not the full Telegram CLI or every external source. This keeps the five-second probe deadline independent of slow application-library imports. Quiet channels are not considered broken.
 
 Unexpected critical-task exit terminates the process so `restart: unless-stopped` can recover it. Docker does not automatically restart an unhealthy container. Reauthorize a revoked session after stopping the app. Logs rotate at 3 × 10 MiB; network libraries are silenced to avoid leaking tokens from URLs or message content from errors.
 

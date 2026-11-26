@@ -22,7 +22,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     healthcheck:
-      test: [CMD, ufifeed, healthcheck]
+      test: [CMD, python, -m, ufifeed.healthcheck]
       interval: 30s
       timeout: 5s
       start_period: 120s
