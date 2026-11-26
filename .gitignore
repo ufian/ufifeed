@@ -1,0 +1,34 @@
+# Local credentials and account sessions
+.env
+.env.*
+!.env.example
+secrets/
+*.session
+*.session-*
+
+# Collected content, databases, backups and logs
+data/
+backups/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Machine-local configuration
+config/ufifeed.toml
+
+# Python and editor artifacts
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.DS_Store
