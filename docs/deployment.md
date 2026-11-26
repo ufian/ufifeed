@@ -38,7 +38,7 @@ The CLI reports code delivery methods and server-directed waits without repeated
 
 For Codex, `scripts/install_codex.py` installs version 0.172.0 from the official release and verifies its pinned SHA-256. Headless login can use device authentication or a securely transferred existing auth cache, as described in the [official auth guide](https://developers.openai.com/codex/auth/). Auth files remain private (0600) and are never committed. `codex login status` verifies the selected sign-in method; a real synthetic request verifies usable model access.
 
-Once the AI provider is configured, the operator can choose `Ufifeed`, set Russian as the client preference, opt its current sources into AI, and queue one initial digest using `configure` (see README). The main app must be stopped while that command uses the reader session. Start the app afterwards; the delivery worker sends the persisted outbox to the paired primary account.
+Once the AI provider is configured, the operator can choose `Ufifeed`, set Russian as the client preference, opt its current and future sources into AI, and queue one initial digest using `configure` (see README). The main app must be stopped while that command uses the reader session. Start the app afterwards; the delivery worker sends the persisted outbox to the paired primary account.
 
 ## Status
 
@@ -69,6 +69,6 @@ For restore, stop the app, preserve current state, restore a consistent version 
 
 ## Updates and rollback
 
-Back up before future schema migrations. Schema version 1 is current. Roll back code only with a compatible database, or restore the matching snapshot. Releases retain their image tag and state paths in `.env`; start Compose from the chosen release and update `current` after a successful rollback. No registry is required.
+Back up before future schema migrations. Schema version 2 is current. Before upgrading from v1, stop the old app and use its `backup` command. Keep the matching encryption key. The new app migrates surviving messages into baseline snapshots; already erased content and prior versions cannot be reconstructed. Set `[storage] retention_days = 0` in persistent VM configuration to retain the journal indefinitely. Roll back code only with a compatible database, or restore the matching snapshot. Releases retain their image tag and state paths in `.env`; start Compose from the chosen release and update `current` after a successful rollback. No registry is required.
 
 Never use `down -v`, global prune, or restart the Docker daemon to update ufifeed. Old releases/images are retained for deliberate cleanup and rollback.

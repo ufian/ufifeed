@@ -12,6 +12,7 @@ import secrets
 import sys
 import time
 import tomllib
+from datetime import timedelta
 from pathlib import Path
 
 from aiogram import Bot
@@ -20,7 +21,7 @@ from telethon import TelegramClient
 
 from ufifeed.authentication import AuthError, login
 from ufifeed.config import Config, Credentials
-from ufifeed.digest import Digests
+from ufifeed.digest import DigestError, Digests
 from ufifeed.reader import Reader
 from ufifeed.store import Store, create_key
 from ufifeed.timeutil import stamp, utcnow
@@ -146,32 +147,42 @@ async def configure(config: Config, credentials: Credentials, args) -> None:
             if args.mode == "ai" and not config.ai.enabled:
                 raise CLIError("Configure an AI provider before selecting AI mode")
             store.set("mode", args.mode)
-        end = utcnow()
         if not await reader.sync_all():
             raise CLIError("Source synchronization is incomplete; inspect status and retry")
+        end = utcnow()
         if args.enable_ai_for_folder:
             if not config.ai.enabled:
                 raise CLIError("Configure an AI provider before enabling folder AI access")
             with store.conn:
+                store._set("ai_folder", True)
                 store.conn.execute("UPDATE sources SET ai_allowed=1 WHERE enabled=1")
         print(f"Configured folder {folder['title']!r}: {len(store.sources())} sources")
-        if args.queue_digest:
-            slot = f"initial:{folder['id']}"
+        if args.queue_digest or getattr(args, "queue_preview", False):
+            import uuid
+
+            slot = (
+                ("manual:" + uuid.uuid4().hex)
+                if getattr(args, "queue_preview", False)
+                else f"initial:{folder['id']}"
+            )
             if store.conn.execute("SELECT 1 FROM runs WHERE slot=?", (slot,)).fetchone():
                 print("The initial digest has already been queued; use /digest for a new preview")
                 return
-            parts = await Digests(config, credentials, store, reader).build(
+            start = max(
                 store.last_window_end(),
+                end - timedelta(hours=config.telegram.initial_history_hours),
+            )
+            parts = await Digests(config, credentials, store, reader).build(
+                start,
                 end,
                 preview=True,
             )
-            run_id = store.enqueue(
-                slot, store.last_window_end(), end, store.get("mode"), parts, advance=False
-            )
+            run_id = store.enqueue(slot, start, end, store.get("mode"), parts, advance=False)
             # Pairing established the destination; queuing explicitly requests delivery.
             store.set("started", True)
-            store.set("initial_digest_queued_at", stamp(utcnow()))
-            print(f"Initial digest queued: run {run_id}, {len(parts)} parts")
+            if args.queue_digest:
+                store.set("initial_digest_queued_at", stamp(utcnow()))
+            print(f"Digest queued: run {run_id}, {len(parts)} parts")
     finally:
         await reader.client.disconnect()
         store.close()
@@ -193,12 +204,22 @@ def status(config: Config) -> None:
                 "folder_error",
                 "digest_error",
                 "last_ai_input",
+                "ai_progress",
             )
         }
         result["sources"] = connection.execute(
             "SELECT COUNT(*) FROM sources WHERE enabled=1",
         ).fetchone()[0]
         result["messages"] = connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        result["deleted"] = connection.execute(
+            "SELECT COUNT(*) FROM messages WHERE deleted=1"
+        ).fetchone()[0]
+        if "message_events" in {
+            r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }:
+            result["journal_events"] = connection.execute(
+                "SELECT COUNT(*) FROM message_events"
+            ).fetchone()[0]
         result["deliveries"] = dict(
             connection.execute(
                 "SELECT status,COUNT(*) FROM outbox GROUP BY status",
@@ -227,6 +248,9 @@ def main() -> None:
     configure_command.add_argument("--mode", choices=("extractive", "ai"))
     configure_command.add_argument("--enable-ai-for-folder", action="store_true")
     configure_command.add_argument("--queue-digest", action="store_true")
+    configure_command.add_argument(
+        "--queue-preview", action="store_true", help="Queue a new manual preview"
+    )
     backup = commands.add_parser("backup")
     backup.add_argument("destination", type=Path)
     args = parser.parse_args()
@@ -283,7 +307,7 @@ def main() -> None:
         raise SystemExit(130) from None
     except Exception as exc:
         # Never dump exception bodies/tracebacks containing secrets to terminal or Docker logs.
-        if isinstance(exc, (CLIError, AuthError, FileNotFoundError, FileExistsError)):
+        if isinstance(exc, (CLIError, AuthError, DigestError, FileNotFoundError, FileExistsError)):
             safe = str(exc)
         elif isinstance(exc, ValidationError):
             safe = "Invalid fields: " + ", ".join(

@@ -8,7 +8,8 @@ user_id = 123456789
 [storage]
 database_path = "data/ufifeed.sqlite3"
 key_path = "secrets/data.key"
-retention_days = 30
+# Keep the message journal indefinitely; positive values opt into deletion after N days.
+retention_days = 0
 
 [telegram]
 session_path = "secrets/reader.session"

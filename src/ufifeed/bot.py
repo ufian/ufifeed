@@ -35,13 +35,16 @@ HELP = """ufifeed — private digests from a dedicated Telegram account folder.
 /digest — preview now, without advancing the schedule
 /mode extractive|ai — excerpts or AI summaries
 /ai_source ID on|off — AI access for a source
+/ai_folder on|off — AI access for current and future sources in this folder
+/journal — message, deletion and version counts
+/history SOURCE_ID MESSAGE_ID — observed versions of a message
 /status — service status and errors
 /retry ID — retry a failed or uncertain delivery
 /purge ID — delete retained source data
 
 Use explicitly selected channels and groups, without automatic categories or unread filters.
 AI access sends source text to the configured AI service. Enable it for sources with an established
-basis for this processing. New sources have AI access disabled.
+basis for this processing. New sources inherit /ai_folder (off by default).
 """
 
 
@@ -218,6 +221,37 @@ class Controls:
                 )
             self.store.set("mode", argument)
             return f"Mode: {argument}. AI processes only sources marked AI: on in /sources."
+        if command == "/journal":
+            return (
+                f"Encrypted journal: {self.store.journal_stats()}\n"
+                f"Archive retention: {self.config.storage.retention_days or 'unlimited'} days. "
+                "Versions are retained after deletion."
+            )
+        if command == "/history":
+            source, msg_id = map(int, argument.split())
+            history = self.store.message_history(source, msg_id)
+            return (
+                "\n\n".join(
+                    f"{event['observed_at']} {event['kind']}\n"
+                    f"Edited at: {event['payload'].get('edited_at') or 'unknown'}\n"
+                    f"{event['payload'].get('text', '')}"
+                    for event in history
+                )
+                or "No observed versions."
+            )
+        if command == "/ai_folder":
+            if argument not in {"on", "off"}:
+                return "Use /ai_folder on|off."
+            if not self.store.get("folder_id"):
+                return "Select a folder first. /folders"
+            with self.store.conn:
+                self.store._set("ai_folder", argument == "on")
+                self.store.conn.execute(
+                    "UPDATE sources SET ai_allowed=? WHERE enabled=1", (int(argument == "on"),)
+                )
+            if argument == "off":
+                self.store.invalidate_pending()
+            return f"AI access for current and future folder sources: {argument}."
         if command == "/ai_source":
             source, state = argument.split()
             source_id = int(source)
@@ -237,6 +271,7 @@ class Controls:
                 f"Folder: {self.store.get('folder_title', 'not selected')} "
                 f"(ID {self.store.get('folder_id')})\n"
                 f"Sources: {len(self.store.sources())}\n"
+                f"Journal: {self.store.journal_stats()}\n"
                 f"Skipped personal dialogs/bots: {self.store.get('folder_skipped', 0)}\n"
                 f"Skipped protected sources: {self.store.get('folder_protected', 0)}\n"
                 f"Folder sync: {self.store.get('folder_synced_at') or 'not yet completed'}\n"
@@ -245,6 +280,7 @@ class Controls:
                 f"Mode: {self.store.get('mode')}\n"
                 f"Digest language: {self.store.get('language', 'en')}\n"
                 f"Last AI input: {self.store.get('last_ai_input', {})}\n"
+                f"AI progress: {self.store.get('ai_progress', {})}\n"
                 f"Queue: {self.store.delivery_status()}\n"
                 f"Delivery issues: {self.store.delivery_issues()}\n" + self.schedule_text()
             )
@@ -321,6 +357,8 @@ async def set_commands(bot: Bot) -> None:
                 ("status", "Status"),
                 ("folders", "Choose a folder"),
                 ("sources", "Sources"),
+                ("journal", "Message journal statistics"),
+                ("history", "Observed message versions"),
                 ("topics", "Topics"),
                 ("schedule", "Schedule"),
                 ("language", "Digest language"),

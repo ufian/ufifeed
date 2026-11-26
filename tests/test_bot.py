@@ -65,3 +65,25 @@ async def test_setting_schedule_validates_time_and_seattle_zone(store, config, c
     assert store.get("schedule")["times"] == ["08:00", "19:30"]
     await controls.execute("/pause", "")
     assert not store.get("schedule")["enabled"]
+
+
+async def test_journal_history_and_folder_ai_controls(store, config, credentials, item):
+    from types import SimpleNamespace
+
+    from ufifeed.bot import Controls
+
+    controls = Controls(config, store, SimpleNamespace(), SimpleNamespace())
+    store.upsert_live(-1000000000123, item)
+    store.delete_messages(-1000000000123, [item["id"]])
+    assert "Versions are retained" in await controls.execute("/journal", "")
+    history = await controls.execute("/history", f"-1000000000123 {item['id']}")
+    assert item["text"] in history and "deleted" in history
+    store.set("folder_id", 214)
+    await controls.execute("/ai_folder", "on")
+    store.sync_folder([{"id": -42, "title": "Added"}], item["date"])
+    assert store.sources()[0]["ai_allowed"]
+    await controls.execute("/ai_source", "-42 off")
+    store.sync_folder([{"id": -42, "title": "Added"}], item["date"])
+    assert not store.sources()[0]["ai_allowed"]
+    store.change_folder(5)
+    assert not store.get("ai_folder")

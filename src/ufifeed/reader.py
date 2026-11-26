@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from telethon import TelegramClient, errors, events, functions, types, utils
@@ -48,18 +50,53 @@ def folder_peers(folder: Any) -> list[Any]:
 
 def message_data(message: Any) -> dict | None:
     if (
-        not isinstance(message, types.Message)
-        or not message.message
+        not isinstance(message, (types.Message, types.MessageService))
         or getattr(message, "noforwards", False)
         or getattr(message, "ttl_period", None)
     ):
         return None
-    reply = message.reply_to
+    reply = getattr(message, "reply_to", None)
+    reactions = getattr(message, "reactions", None)
+    counts = []
+    for result in getattr(reactions, "results", []):
+        reaction = result.reaction
+        counts.append(
+            {
+                "type": type(reaction).__name__,
+                "emoji": getattr(reaction, "emoticon", None),
+                "document_id": getattr(reaction, "document_id", None),
+                "count": result.count,
+            }
+        )
+    media = getattr(message, "media", None) or getattr(message, "action", None)
+    text = getattr(message, "message", "") or ""
+    if isinstance(media, types.MessageMediaPoll):
+        text += "\n" + media.poll.question.text
+        text += "\n" + "\n".join(answer.text.text for answer in media.poll.answers)
     return {
         "id": message.id,
         "date": message.date,
-        "edited_at": message.edit_date,
-        "text": message.message,
+        "edited_at": getattr(message, "edit_date", None),
+        "text": text,
+        "sender_id": utils.get_peer_id(message.from_id) if message.from_id else None,
+        "media_kind": type(media).__name__ if media else None,
+        "media_id": next(
+            (
+                getattr(getattr(media, field, None), "id", None)
+                for field in ("photo", "document", "poll")
+                if getattr(getattr(media, field, None), "id", None)
+            ),
+            None,
+        ),
+        "entities": [entity.to_dict() for entity in getattr(message, "entities", []) or []],
+        "grouped_id": getattr(message, "grouped_id", None),
+        "reactions": counts if reactions is not None else None,
+        "reaction_count": sum(r["count"] for r in counts if r["type"] != "ReactionPaid")
+        if reactions is not None
+        else None,
+        "paid_reactions": sum(r["count"] for r in counts if r["type"] == "ReactionPaid")
+        if reactions is not None
+        else None,
         "reply_to": getattr(reply, "reply_to_msg_id", None),
         "topic_id": (
             getattr(reply, "reply_to_top_id", None)
@@ -91,6 +128,7 @@ class Reader:
         self.client.add_event_handler(self.on_message, events.NewMessage())
         self.client.add_event_handler(self.on_message, events.MessageEdited())
         self.client.add_event_handler(self.on_delete, events.MessageDeleted())
+        self.client.add_event_handler(self.on_raw, events.Raw())
 
     async def connect(self) -> None:
         await self.client.connect()
@@ -140,6 +178,12 @@ class Reader:
                     "id": source_id,
                     "title": entity.title,
                     "username": getattr(entity, "username", None),
+                    "kind": "group"
+                    if isinstance(entity, types.Chat)
+                    or getattr(entity, "megagroup", False)
+                    or getattr(entity, "gigagroup", False)
+                    else "channel",
+                    "peer_type": "chat" if isinstance(entity, types.Chat) else "channel",
                 }
             )
         # A command can change the folder while the above network calls are in flight.
@@ -169,12 +213,69 @@ class Reader:
         if data:
             self.store.upsert_live(source_id, data)
         else:
-            self.store.delete_messages(source_id, [event.id])
+            self.store.redact(source_id, event.id)
+
+    async def on_raw(self, update: Any) -> None:
+        if isinstance(update, types.UpdateNewMessage) and isinstance(
+            update.message, types.MessageService
+        ):
+            message = update.message
+            await self.on_message(
+                SimpleNamespace(
+                    chat_id=utils.get_peer_id(message.peer_id), message=message, id=message.id
+                )
+            )
+        if not isinstance(update, types.UpdateMessageReactions):
+            return
+        source_id = utils.get_peer_id(update.peer)
+        if source_id not in {s["id"] for s in self.store.sources()}:
+            return
+        # Persist reaction-only updates without waiting for the next history pass.
+        row = self.store.conn.execute(
+            "SELECT * FROM messages WHERE source_id=? AND id=?", (source_id, update.msg_id)
+        ).fetchone()
+        if row is None or row["deleted"]:
+            return
+        details = json.loads(self.store.decrypt(row["details"])) if row["details"] else {}
+        counts = [
+            {
+                "type": type(r.reaction).__name__,
+                "emoji": getattr(r.reaction, "emoticon", None),
+                "document_id": getattr(r.reaction, "document_id", None),
+                "count": r.count,
+            }
+            for r in update.reactions.results
+        ]
+        self.store.upsert_live(
+            source_id,
+            {
+                **details,
+                "id": row["id"],
+                "date": parse(row["date"]),
+                "edited_at": parse(row["edited_at"]) if row["edited_at"] else None,
+                "text": self.store.decrypt(row["text"]),
+                "reply_to": row["reply_to"],
+                "topic_id": row["topic_id"],
+                "reactions": counts,
+                "reaction_count": sum(r["count"] for r in counts if r["type"] != "ReactionPaid"),
+                "paid_reactions": sum(r["count"] for r in counts if r["type"] == "ReactionPaid"),
+            },
+        )
 
     async def on_delete(self, event: Any) -> None:
-        # Small-group deletion updates may omit chat_id. Don't guess an ambiguous peer.
-        if event.chat_id is not None:
+        active = {s["id"] for s in self.store.sources()}
+        if event.chat_id in active:
             self.store.delete_messages(event.chat_id, event.deleted_ids)
+        elif event.chat_id is None:
+            for msg_id in event.deleted_ids:
+                # Unscoped IDs belong to basic chats/private dialogs, never channel ID spaces.
+                matches = self.store.conn.execute(
+                    "SELECT m.source_id FROM messages m JOIN sources s ON s.id=m.source_id "
+                    "WHERE s.enabled=1 AND s.peer_type='chat' AND m.id=?",
+                    (msg_id,),
+                ).fetchall()
+                if len(matches) == 1:
+                    self.store.delete_messages(matches[0][0], [msg_id])
 
     async def reconcile(self, source: dict) -> None:
         source_id = source["id"]
@@ -200,6 +301,8 @@ class Reader:
             data = message_data(message)
             if data:
                 page.append(data)
+            else:
+                self.store.redact(source_id, message.id)
             seen += 1
             if seen % 100 == 0:
                 self.store.commit_page(source_id, page, cursor)
@@ -212,8 +315,25 @@ class Reader:
             data = message_data(message)
             if data and data["date"] >= parse(source["since"]):
                 self.store.upsert_live(source_id, data)
-            else:
-                self.store.delete_messages(source_id, [message.id])
+            elif not data:
+                self.store.redact(source_id, message.id)
+        # Detect missed deletions by querying known IDs, never by interpreting history gaps.
+        ids = self.store.verification_ids(source_id)
+        for offset in range(0, len(ids), 100):
+            batch = ids[offset : offset + 100]
+            found = await self.client.get_messages(entity, ids=batch)
+            # A malformed/partial result must not turn into false deletion records.
+            if len(found) != len(batch):
+                raise ReaderError("Incomplete message verification response")
+            for msg_id, message in zip(batch, found, strict=True):
+                if message is None or isinstance(message, types.MessageEmpty):
+                    self.store.delete_messages(source_id, [msg_id])
+                elif message.id != msg_id:
+                    raise ReaderError("Unexpected message verification ID")
+                elif data := message_data(message):
+                    self.store.upsert_live(source_id, data)
+                else:
+                    self.store.redact(source_id, msg_id)
         self.store.synced(source_id, started)
 
     async def sync_all(self) -> bool:

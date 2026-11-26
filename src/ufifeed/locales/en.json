@@ -3,8 +3,11 @@
   "ai_title": "AI summary",
   "manual_suffix": " · preview",
   "continued_suffix": " (continued)",
-  "window_capped": "Large window: considered the latest 5000 messages.",
   "empty": "No matching new messages.",
   "ai_sources_only": "Only sources with AI access enabled are included.",
-  "ai_input_coverage": "AI input: {sources} sources, {messages} messages."
+  "ai_input_coverage": "AI input: {sources} sources, {messages} messages.",
+  "world_title": "World events — the overall picture",
+  "group_title": "Discussion — {title}",
+  "deleted_mark": "[deleted; archived content]",
+  "no_text": "No text; media or service event"
 }

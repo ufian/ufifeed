@@ -162,7 +162,8 @@ async def test_busy_chat_cannot_hide_other_sources_from_ai_input(
     from datetime import timedelta
 
     config.ai.enabled, config.ai.model = True, "test-model"
-    config.ai.max_input_chars = 1000
+    config.ai.max_input_chars = 2000
+    config.ai.daily_call_limit = 1000
     config.digest.max_items = 1  # Output count must not limit input coverage.
     store.set("mode", "ai")
     store.sync_folder(
@@ -194,14 +195,16 @@ async def test_busy_chat_cannot_hide_other_sources_from_ai_input(
         data = json.loads(request.content)
         records_json = data["messages"][1]["content"]
         assert len(records_json) <= config.ai.max_input_chars
-        requests.extend(json.loads(records_json))
+        records = json.loads(records_json)
+        requests.extend(records)
+        ref = records[0].get("refs", [records[0].get("ref")])[0]
         return httpx.Response(
             200,
             json={
                 "choices": [
                     {
                         "message": {
-                            "content": '{"items":[{"text":"Summary","refs":[1]}]}',
+                            "content": json.dumps({"items": [{"text": "Summary", "refs": [ref]}]}),
                         }
                     }
                 ]
@@ -220,5 +223,131 @@ async def test_busy_chat_cannot_hide_other_sources_from_ai_input(
         config, credentials, store, SimpleNamespace(sync_all=AsyncMock(return_value=True))
     )
     await digests.build(item["date"] - timedelta(hours=1), utcnow(), preview=True)
-    assert {record["source"] for record in requests} == {"Busy chat", "Quiet channel"}
+    assert {record["source"] for record in requests if "source" in record} == {
+        "Busy chat",
+        "Quiet channel",
+    }
     assert store.get("last_ai_input")["sources"] == 2
+
+
+def test_batches_keep_every_character_and_all_messages():
+    from ufifeed.digest import batches, select_ai_items
+
+    rows = [
+        {"id": i, "text": f"{i} " + 'quoted "😀" ' * 200, "source_id": i % 5} for i in range(501)
+    ]
+    assert len(select_ai_items(rows, [], [])) == 501
+    records = [{"ref": r["id"], "text": r["text"]} for r in rows]
+    chunks = batches(records, 1000)
+    import json
+
+    assert all(len(json.dumps(chunk, ensure_ascii=False)) <= 1000 for chunk in chunks)
+    for record in records:
+        assert (
+            "".join(
+                part["text"] for chunk in chunks for part in chunk if part["ref"] == record["ref"]
+            )
+            == record["text"]
+        )
+
+
+async def test_world_and_each_group_have_isolated_summaries_with_reactions_and_context(
+    store, config, credentials, item, monkeypatch
+):
+    import json
+    from datetime import timedelta
+
+    config.ai.enabled, config.ai.provider = True, "codex"
+    store.set("mode", "ai")
+    sources = [
+        {"id": -1000000000123, "title": "World A"},
+        {"id": -1000000000456, "title": "World B"},
+        {"id": -42, "title": "Chat A", "kind": "group", "peer_type": "chat"},
+        {"id": -43, "title": "Chat B", "kind": "group", "peer_type": "chat"},
+    ]
+    store.sync_folder(sources, item["date"])
+    with store.conn:
+        store.conn.execute("UPDATE sources SET ai_allowed=1")
+    for source in sources:
+        store.upsert_live(
+            source["id"],
+            {
+                **item,
+                "text": source["title"],
+                "sender_id": 42,
+                "reply_to": 9 if source["id"] == -42 else None,
+                "reactions": [],
+                "reaction_count": 80,
+            },
+        )
+    store.upsert_live(
+        -42,
+        {**item, "id": 9, "date": item["date"] - timedelta(days=2), "text": "Original question"},
+    )
+    store.delete_messages(-1000000000456, [item["id"]])
+    calls = []
+
+    async def complete(ai, instructions, records, schema):
+        calls.append((instructions, records))
+        return json.dumps({"items": [{"text": "Summary", "refs": [records[0]["ref"]]}]})
+
+    monkeypatch.setattr("ufifeed.digest.codex_complete", complete)
+    parts = await Digests(config, credentials, store, None).build(
+        item["date"], utcnow(), preview=True
+    )
+    assert len(calls) == 3
+    assert {r["source"] for r in calls[0][1]} == {"World A", "World B"}
+    assert "overall picture" in calls[0][0]
+    assert any(r["deleted"] for r in calls[0][1])
+    chats = {records[0]["source"]: (prompt, records) for prompt, records in calls[1:]}
+    prompt, records = chats["Chat A"]
+    assert "organic reactions" in prompt and records[0]["reactions"] == 80
+    assert any(r["text"] == "Original question" and r["context_only"] for r in records)
+    assert {r["source"] for r in records} == {"Chat A"}
+    assert {r["source"] for r in chats["Chat B"][1]} == {"Chat B"}
+    assert len(parts) == 3 and "World events" in parts[0]
+    assert store.get("last_ai_input")["messages"] == 4
+
+
+async def test_chunk_analysis_resumes_from_encrypted_cache_after_failure(
+    store, config, credentials, item, monkeypatch
+):
+    import json
+
+    config.ai.enabled, config.ai.provider = True, "codex"
+    config.ai.max_input_chars = 1500
+    rows = [
+        {
+            **item,
+            "id": i,
+            "date": item["date"].isoformat(),
+            "title": "Source",
+            "source_id": -42,
+            "ai_allowed": True,
+            "text": str(i) + "x" * 1500,
+        }
+        for i in range(3)
+    ]
+    calls = []
+    fail = True
+
+    async def complete(ai, instructions, records, schema):
+        nonlocal fail
+        calls.append(records)
+        if len(calls) == 2 and fail:
+            from ufifeed.codex_provider import CodexError
+
+            fail = False
+            raise CodexError("Temporary failure")
+        ref = records[0].get("refs", [records[0].get("ref")])[0]
+        return json.dumps({"items": [{"text": "Finding", "refs": [ref]}]})
+
+    monkeypatch.setattr("ufifeed.digest.codex_complete", complete)
+    with pytest.raises(DigestError, match="Temporary failure"):
+        await summarize(config, credentials, store, rows)
+    first = calls[0]
+    result = await summarize(config, credentials, store, rows)
+    assert result and calls.count(first) == 1
+    assert all(
+        b"Finding" not in row[0] for row in store.conn.execute("SELECT payload FROM analysis_cache")
+    )

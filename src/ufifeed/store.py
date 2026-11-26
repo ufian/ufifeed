@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS outbox (
 CREATE TABLE IF NOT EXISTS ai_usage (
     day TEXT PRIMARY KEY, calls INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS message_events (
+    id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES sources(id),
+    message_id INTEGER NOT NULL, observed_at TEXT NOT NULL, kind TEXT NOT NULL,
+    payload BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS event_message ON message_events(source_id,message_id,id);
+CREATE TABLE IF NOT EXISTS analysis_cache (
+    key TEXT PRIMARY KEY, payload BLOB NOT NULL, created_at TEXT NOT NULL
+);
 """
 
 
@@ -67,16 +76,41 @@ class Store:
         self.conn.executescript(SCHEMA)
         os.chmod(path, 0o600)
         version = self.get("schema_version", 0)
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             raise ValueError("Unsupported database schema")
-        if version == 0:
-            self.set("schema_version", 1)
         # Fail early on a wrong encryption key, before collecting or sending anything.
         check = self.get("key_check")
         if check is None:
             self.set("key_check", self.encrypt("ufifeed").decode())
         elif self.decrypt(check.encode()) != "ufifeed":
             raise ValueError("Incorrect data key")
+        if version < 2:
+            with self.conn:
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.conn.execute(
+                    "ALTER TABLE sources ADD COLUMN kind TEXT NOT NULL DEFAULT 'channel'"
+                )
+                self.conn.execute(
+                    "ALTER TABLE sources ADD COLUMN peer_type TEXT NOT NULL DEFAULT 'channel'"
+                )
+                for column in ("deleted_at TEXT", "reaction_at TEXT", "details BLOB"):
+                    self.conn.execute(f"ALTER TABLE messages ADD COLUMN {column}")
+                for row in self.conn.execute("SELECT * FROM messages").fetchall():
+                    self._event(
+                        row["source_id"],
+                        row["id"],
+                        "baseline",
+                        {
+                            "text": self.decrypt(row["text"]),
+                            "date": row["date"],
+                            "edited_at": row["edited_at"],
+                            "reply_to": row["reply_to"],
+                            "topic_id": row["topic_id"],
+                            "deleted": bool(row["deleted"]),
+                            "historical_versions_unavailable": True,
+                        },
+                    )
+                self._set("schema_version", 2)
 
     @classmethod
     def open(cls, config: Config) -> Store:
@@ -148,12 +182,16 @@ class Store:
                     username=excluded.username, enabled=1""",
                     (source_id, source["title"], source.get("username"), stamp(since)),
                 )
+                self.conn.execute(
+                    "UPDATE sources SET kind=?,peer_type=? WHERE id=?",
+                    (source.get("kind", "channel"), source.get("peer_type", "channel"), source_id),
+                )
                 if source_id not in active:
                     self.conn.execute(
                         "UPDATE sources SET cursor=0,initialized=0,since=?,"
-                        "last_sync=NULL,error=NULL,ai_allowed=0 "
+                        "last_sync=NULL,error=NULL,ai_allowed=? "
                         "WHERE id=?",
-                        (stamp(since), source_id),
+                        (stamp(since), int(self.get("ai_folder", False)), source_id),
                     )
             self.conn.execute("UPDATE sources SET ai_allowed=0 WHERE enabled=0")
             self._set("folder_synced_at", stamp(utcnow()))
@@ -162,6 +200,7 @@ class Store:
     def change_folder(self, folder_id: int | None) -> None:
         with self.conn:
             self._set("folder_id", folder_id)
+            self._set("ai_folder", False)
             self._set("folder_synced_at", None)
             self._set("folder_error", "sync_pending" if folder_id else None)
             self.conn.execute("UPDATE sources SET enabled=0,ai_allowed=0")
@@ -183,30 +222,132 @@ class Store:
             {
                 "settings": {
                     key: self.get(key)
-                    for key in ("folder_id", "schedule", "topics", "exclude", "mode", "language")
+                    for key in (
+                        "folder_id",
+                        "schedule",
+                        "topics",
+                        "exclude",
+                        "mode",
+                        "language",
+                        "content_epoch",
+                    )
                 },
-                "sources": [(s["id"], s["ai_allowed"]) for s in self.sources()],
+                "sources": [(s["id"], s["ai_allowed"], s["kind"]) for s in self.sources()],
             },
             sort_keys=True,
         )
 
-    def save_message(self, source_id: int, item: dict) -> None:
+    def _event(self, source_id: int, message_id: int, kind: str, payload: dict) -> None:
         self.conn.execute(
-            """INSERT INTO messages(source_id,id,date,edited_at,text,content_hash,reply_to,topic_id)
-            VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(source_id,id) DO UPDATE SET
-            edited_at=excluded.edited_at,text=excluded.text,content_hash=excluded.content_hash,
-            reply_to=excluded.reply_to,topic_id=excluded.topic_id,deleted=0""",
+            "INSERT INTO message_events(source_id,message_id,observed_at,kind,payload) "
+            "VALUES (?,?,?,?,?)",
+            (
+                source_id,
+                message_id,
+                stamp(utcnow()),
+                kind,
+                self.encrypt(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+            ),
+        )
+
+    def save_message(self, source_id: int, item: dict) -> None:
+        previous = self.conn.execute(
+            "SELECT * FROM messages WHERE source_id=? AND id=?", (source_id, item["id"])
+        ).fetchone()
+        details = {
+            key: item.get(key)
+            for key in (
+                "sender_id",
+                "media_kind",
+                "media_id",
+                "entities",
+                "grouped_id",
+                "reactions",
+                "reaction_count",
+                "paid_reactions",
+            )
+        }
+        old_details = (
+            json.loads(self.decrypt(previous["details"]))
+            if previous and previous["details"]
+            else {}
+        )
+        if item.get("reactions") is None:
+            for key in ("reactions", "reaction_count", "paid_reactions"):
+                details[key] = old_details.get(key)
+        edited = stamp(item["edited_at"]) if item.get("edited_at") else None
+        # A delayed new-message event must not overwrite a later edit.
+        if previous and previous["edited_at"] and (edited or "") < previous["edited_at"]:
+            return
+        content = {
+            "text": item["text"],
+            "reply_to": item.get("reply_to"),
+            "topic_id": item.get("topic_id"),
+            "edited_at": edited,
+            **{
+                k: details[k]
+                for k in ("sender_id", "media_kind", "media_id", "entities", "grouped_id")
+            },
+        }
+        digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+        changed = previous is None or previous["content_hash"] != digest
+        reactions_changed = any(
+            details.get(k) != old_details.get(k)
+            for k in ("reactions", "reaction_count", "paid_reactions")
+        )
+        reaction_at = (
+            stamp(utcnow())
+            if reactions_changed
+            else (previous["reaction_at"] if previous else None)
+        )
+        self.conn.execute(
+            """INSERT INTO messages(source_id,id,date,edited_at,text,content_hash,
+            reply_to,topic_id,details,reaction_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_id,id) DO UPDATE SET
+            date=excluded.date,edited_at=excluded.edited_at,text=excluded.text,
+            content_hash=excluded.content_hash,
+            reply_to=excluded.reply_to,topic_id=excluded.topic_id,
+            details=excluded.details,reaction_at=excluded.reaction_at""",
             (
                 source_id,
                 item["id"],
                 stamp(item["date"]),
                 stamp(item["edited_at"]) if item.get("edited_at") else None,
                 self.encrypt(item["text"]),
-                hashlib.sha256(item["text"].encode()).hexdigest(),
+                digest,
                 item.get("reply_to"),
                 item.get("topic_id"),
+                self.encrypt(json.dumps(details, ensure_ascii=False)),
+                reaction_at,
             ),
         )
+        if changed or reactions_changed:
+            kind = "created" if previous is None else ("edited" if changed else "reactions")
+            if (
+                previous
+                and previous["details"] is None
+                and self.decrypt(previous["text"]) == item["text"]
+            ):
+                kind = "observed"
+            elif (
+                previous
+                and previous["deleted"]
+                and not self.decrypt(previous["text"])
+                and item["text"]
+            ):
+                kind = "late_content"
+            self._event(
+                source_id,
+                item["id"],
+                kind,
+                {
+                    **content,
+                    **details,
+                    "date": stamp(item["date"]),
+                    "edited_at": edited,
+                    "deleted": bool(previous and previous["deleted"]),
+                },
+            )
 
     def upsert_live(self, source_id: int, item: dict) -> None:
         with self.conn:
@@ -234,19 +375,148 @@ class Store:
 
     def delete_messages(self, source_id: int, ids: list[int]) -> None:
         with self.conn:
-            self.conn.executemany(
-                "UPDATE messages SET deleted=1,text=? WHERE source_id=? AND id=?",
-                [(self.encrypt(""), source_id, msg_id) for msg_id in ids],
+            for msg_id in ids:
+                row = self.conn.execute(
+                    "SELECT * FROM messages WHERE source_id=? AND id=?", (source_id, msg_id)
+                ).fetchone()
+                if row and row["deleted"]:
+                    continue
+                if row is None:
+                    self.save_message(source_id, {"id": msg_id, "date": utcnow(), "text": ""})
+                self.conn.execute(
+                    "UPDATE messages SET deleted=1,deleted_at=? WHERE source_id=? AND id=?",
+                    (stamp(utcnow()), source_id, msg_id),
+                )
+                self._event(
+                    source_id,
+                    msg_id,
+                    "deleted",
+                    {
+                        "text": self.decrypt(row["text"]) if row else "",
+                        "content_observed": row is not None,
+                    },
+                )
+
+    def redact(self, source_id: int, msg_id: int) -> None:
+        """Forget protected/disappearing content and derived output."""
+        if not self.conn.execute(
+            "SELECT 1 FROM messages WHERE source_id=? AND id=?", (source_id, msg_id)
+        ).fetchone():
+            return
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM message_events WHERE source_id=? AND message_id=?", (source_id, msg_id)
             )
+            self.conn.execute(
+                "DELETE FROM messages WHERE source_id=? AND id=?", (source_id, msg_id)
+            )
+            self.conn.execute("DELETE FROM analysis_cache")
+            self._set("content_epoch", self.get("content_epoch", 0) + 1)
+            self._invalidate_pending()
+
+    def verification_ids(self, source_id: int) -> list[int]:
+        recent = [
+            r[0]
+            for r in self.conn.execute(
+                "SELECT id FROM messages WHERE source_id=? AND deleted=0 "
+                "ORDER BY id DESC LIMIT 200",
+                (source_id,),
+            )
+        ]
+        cursor = self.get(f"verify:{source_id}", 0)
+        older = [
+            r[0]
+            for r in self.conn.execute(
+                "SELECT id FROM messages WHERE source_id=? AND deleted=0 AND id>? "
+                "ORDER BY id LIMIT 100",
+                (source_id, cursor),
+            )
+        ]
+        self.set(f"verify:{source_id}", older[-1] if older else 0)
+        return sorted(set(recent + older))
 
     def candidates(self, start: datetime, end: datetime) -> list[dict]:
         rows = self.conn.execute(
-            """SELECT m.*,s.title,s.username,s.ai_allowed FROM messages m
-            JOIN sources s ON s.id=m.source_id WHERE s.enabled=1 AND m.deleted=0
-            AND m.date>=? AND m.date<? ORDER BY m.date DESC,m.source_id,m.id LIMIT 5000""",
-            (stamp(start), stamp(end)),
+            """SELECT m.*,s.title,s.username,s.ai_allowed,s.kind FROM messages m
+            JOIN sources s ON s.id=m.source_id WHERE s.enabled=1 AND (
+            (m.date>=? AND m.date<?) OR (m.deleted_at>=? AND m.deleted_at<?)
+            OR (m.edited_at>=? AND m.edited_at<?)
+            OR (s.kind='group' AND m.reaction_at>=? AND m.reaction_at<?))
+            ORDER BY m.date,m.source_id,m.id""",
+            (stamp(start), stamp(end)) * 4,
         )
-        return [{**dict(row), "text": self.decrypt(row["text"])} for row in rows]
+        return [
+            {
+                **dict(row),
+                "text": self.decrypt(row["text"]),
+                **(json.loads(self.decrypt(row["details"])) if row["details"] else {}),
+            }
+            for row in rows
+        ]
+
+    def cache_get(self, key: str) -> list[dict] | None:
+        row = self.conn.execute("SELECT payload FROM analysis_cache WHERE key=?", (key,)).fetchone()
+        return json.loads(self.decrypt(row[0])) if row else None
+
+    def with_reply_context(self, rows: list[dict]) -> list[dict]:
+        """Include archived parents, without importing unrelated chats or counting them as new."""
+        result = list(rows)
+        known = {(r["source_id"], r["id"]) for r in result}
+        frontier = rows
+        for _ in range(3):
+            added = []
+            for child in frontier:
+                key = (child["source_id"], child.get("reply_to"))
+                if not key[1] or key in known:
+                    continue
+                row = self.conn.execute(
+                    "SELECT m.*,s.title,s.username,s.ai_allowed,s.kind FROM messages m "
+                    "JOIN sources s ON s.id=m.source_id WHERE s.enabled=1 AND s.ai_allowed=1 "
+                    "AND m.source_id=? AND m.id=?",
+                    key,
+                ).fetchone()
+                if row:
+                    added.append(
+                        {
+                            **dict(row),
+                            "text": self.decrypt(row["text"]),
+                            **(json.loads(self.decrypt(row["details"])) if row["details"] else {}),
+                            "context_only": True,
+                        }
+                    )
+                    known.add(key)
+            result.extend(added)
+            frontier = added
+        return result
+
+    def cache_put(self, key: str, result: list[dict]) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO analysis_cache VALUES (?,?,?)",
+                (key, self.encrypt(json.dumps(result, ensure_ascii=False)), stamp(utcnow())),
+            )
+
+    def journal_stats(self) -> dict:
+        return {
+            "messages": self.conn.execute("SELECT count(*) FROM messages").fetchone()[0],
+            "deleted": self.conn.execute(
+                "SELECT count(*) FROM messages WHERE deleted=1"
+            ).fetchone()[0],
+            "events": self.conn.execute("SELECT count(*) FROM message_events").fetchone()[0],
+        }
+
+    def message_history(self, source_id: int, message_id: int) -> list[dict]:
+        return [
+            {
+                "observed_at": row["observed_at"],
+                "kind": row["kind"],
+                "payload": json.loads(self.decrypt(row["payload"])),
+            }
+            for row in self.conn.execute(
+                "SELECT * FROM message_events WHERE source_id=? AND message_id=? ORDER BY id",
+                (source_id, message_id),
+            )
+        ]
 
     def enqueue(
         self,
@@ -344,9 +614,20 @@ class Store:
             return True
 
     def cleanup(self, days: int, now: datetime | None = None) -> None:
-        cutoff = stamp((now or utcnow()) - timedelta(days=days))
+        cutoff = stamp((now or utcnow()) - timedelta(days=days or 30))
         with self.conn:
-            self.conn.execute("DELETE FROM messages WHERE date<?", (cutoff,))
+            if days:
+                self.conn.execute(
+                    "DELETE FROM message_events WHERE (source_id,message_id) IN "
+                    "(SELECT source_id,id FROM messages WHERE date<? AND "
+                    "COALESCE(deleted_at,date)<?)",
+                    (cutoff, cutoff),
+                )
+                self.conn.execute(
+                    "DELETE FROM messages WHERE date<? AND COALESCE(deleted_at,date)<?",
+                    (cutoff, cutoff),
+                )
+            self.conn.execute("DELETE FROM analysis_cache WHERE created_at<?", (cutoff,))
             # Keep minimal run keys; remove private payloads and disable retries after retention.
             self.conn.execute(
                 "UPDATE outbox SET payload=?,status='expired',error=NULL WHERE run_id IN "
@@ -356,7 +637,9 @@ class Store:
 
     def purge(self, source_id: int) -> None:
         with self.conn:
+            self.conn.execute("DELETE FROM message_events WHERE source_id=?", (source_id,))
             self.conn.execute("DELETE FROM messages WHERE source_id=?", (source_id,))
+            self.conn.execute("DELETE FROM analysis_cache")
             self.conn.execute("UPDATE sources SET ai_allowed=0 WHERE id=?", (source_id,))
             # Digests can combine sources; remove all retained payloads conservatively.
             self.conn.execute("UPDATE outbox SET payload=?,status='expired',error=NULL", (b"",))

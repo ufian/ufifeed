@@ -7,14 +7,14 @@ Application code, comments, documentation, CLI messages, and bot controls are in
 ## Features
 
 - Folder selection through `/folders` and `/folder ID`; membership reconciliation every five minutes and before each digest.
-- Text/captions, live updates, edits, and history recovery. Initial import covers the latest 24 hours.
-- Topic/exclusion filters, exact-text deduplication, and links to original messages.
+- Encrypted message journal with observed edit versions, deletion tombstones, reaction changes, reply/topic references and media metadata. Initial import covers the latest 24 hours; live collection continues afterwards.
+- One cross-channel synthesis of important world events, plus a separate discussion summary for every group, with attention to reactions and deleted content. Topic/exclusion filters and source links.
 - AI summaries through authenticated **Codex CLI** or an OpenAI-compatible Chat Completions endpoint, with per-source AI access and citation validation.
 - Daily schedules in an IANA time zone, including Seattle (`America/Los_Angeles`), manual previews, pause/resume, and missed-window coalescing.
 - Encrypted message/outbox payloads, persistent SQLite state, and explicit handling of uncertain deliveries.
 - One Docker Compose application, CI, and tests; no inbound ports required.
 
-Only explicitly selected channels and groups are supported, including pinned peers. Personal dialogs and bots are skipped. Automatic categories and unread/muted/archived filters are rejected. Protected/disappearing content is excluded; media files are not downloaded. Telegram does not guarantee every deletion event.
+Only explicitly selected channels and groups are supported, including pinned peers. Personal dialogs and bots are skipped. Automatic categories and unread/muted/archived filters are rejected. Protected/disappearing content is excluded; media files are not downloaded. Telegram does not guarantee every deletion event. The collector also rechecks the latest 200 saved IDs and rotates through 100 older IDs per source on each synchronization. It never interprets numeric history gaps as deletions. Only versions actually observed can be archived: content deleted before first capture and edits overwritten before observation cannot be recovered. Protected/disappearing content is excluded even from version history.
 
 ## VM deployment
 
@@ -62,7 +62,8 @@ Useful controls:
 
 - `/language` shows available digest languages and the current preference.
 - `/mode extractive` selects source excerpts; `/mode ai` selects AI summaries.
-- `/ai_source ID on|off` explicitly enables/disables AI processing of a source. New or re-added sources default to off.
+- `/ai_source ID on|off` controls a source. `/ai_folder on|off` controls current and future members of the selected folder; the default is off.
+- `/journal` shows archive counts. `/history SOURCE_ID MESSAGE_ID` returns observed text versions and their timestamps, including deleted messages.
 - `/pause` stops scheduled digests while collection continues; `/resume` resumes and can catch up.
 - `/retry ID` explains the possible duplicate risk before an uncertain delivery can be retried.
 - `/purge ID` removes retained messages for a disabled source and stored digest payloads. Delivered Telegram messages and external backups are unaffected.
@@ -94,11 +95,13 @@ model = "your-model"
 
 Store `ai_api_key` in `state/secrets/credentials.json` or set `AI_API_KEY`. A local endpoint may not require a key. Then enable AI access for the intended sources and run `/mode ai`.
 
+Every eligible message in the window enters bounded batches, including duplicates and retained deleted posts. Long text is split, never silently cropped. Intermediate findings are cached encrypted and merged recursively into the final synthesis. Daily attempt limits and provider limits still apply; incomplete preparation does not advance the window or send a partial result. `/status` reports progress.
+
 Only AI-enabled sources cross either backend boundary. Citation IDs and output structure are checked, but that does not prove the model's factual accuracy. Provider errors retain collected data and leave scheduled windows unadvanced. There is no silent fallback to another provider. Telegram's [content licensing terms](https://telegram.org/tos/content-licensing#large-language-models-and-ai) restrict AI use more broadly than training; see [research](docs/research.md) before enabling sources.
 
 ## Offline bootstrap and operations
 
-Stop the main app before using the reader session from an administrative command. The following explicitly chooses a folder, enables AI for its current sources, and queues one initial digest for delivery when the app starts:
+Stop the main app before using the reader session from an administrative command. The following explicitly chooses a folder, enables AI for its current and future sources, and queues one initial digest for delivery when the app starts:
 
 ```sh
 /home/ufian/ufifeed/compose stop app
@@ -107,9 +110,9 @@ Stop the main app before using the reader session from an administrative command
 /home/ufian/ufifeed/compose run --rm --interactive=false -T app status
 ```
 
-The initial digest key is idempotent per folder. Use `/digest` for subsequent manual previews. `status` reports counts and delivery states without message bodies or credentials.
+The initial digest key is idempotent per folder. Use `/digest` for subsequent manual previews, or `configure --folder Ufifeed --queue-preview` while the app is stopped. `status` reports counts and delivery states without message bodies or credentials.
 
-Texts expire after 30 days by default. Message/outbox payloads use Fernet; IDs, titles, times, and settings remain readable metadata. Session/auth cache files rely on filesystem permissions. Do not lose `state/secrets/data.key`: retained text cannot be recovered without it.
+The message journal is retained indefinitely by default (`storage.retention_days = 0`). Positive values opt into finite retention of messages and their versions. Existing installations keep their explicit setting until changed. Derived AI cache/outbox payloads expire after 30 days with unlimited archive retention. Message bodies, version snapshots, reaction/sender details and AI cache/outbox payloads use Fernet; IDs, titles, times, deletion flags and settings remain readable metadata. Session/auth cache files rely on filesystem permissions. Do not lose `state/secrets/data.key`: retained text cannot be recovered without it.
 
 ## Development
 

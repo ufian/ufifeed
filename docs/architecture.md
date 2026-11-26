@@ -21,21 +21,27 @@ flowchart LR
 
 `messages.getDialogFilters` supplies explicit included/pinned peers and exclusions. See [Telegram folder documentation](https://core.telegram.org/api/folders). Collection never automatically joins chats. Personal dialogs, bots, and protected sources are skipped. Dynamic categories and unread/muted/archive filters are intentionally unsupported.
 
-Folder membership changes are applied atomically after all peers resolve. Removed sources are disabled; new/re-added sources import the latest 24 hours and start with AI access off. Membership changes invalidate unsent digest payloads. A network request already in flight cannot be retracted.
+Folder membership changes are applied atomically after all peers resolve. Removed sources are disabled; new/re-added sources import the latest 24 hours and inherit the folder AI policy (off by default). Membership changes invalidate unsent digest payloads. A network request already in flight cannot be retracted.
 
 Each source has its own history cursor. Live events upsert messages but never advance that cursor. Recovery scans forward to a snapshot of the latest ID, committing pages of 100 inspected messages with the cursor in one transaction. A crash repeats an upsert rather than skipping the middle of the range. An empty initial time window still advances to the snapshot ID, preventing accidental full-history import next time.
 
-Edits replace message text. The latest 100 messages are reread for recent offline edits; older offline edits and every deletion cannot be guaranteed. Deletion events without an identifiable source are not guessed. Text/captions, UTC timestamps, reply IDs, and topic IDs are retained; media files are not downloaded and reply-chain clustering is not yet implemented.
+The schema-v2 journal stores a current encrypted snapshot plus append-only encrypted events for creation, observed edits, reactions and deletion. Each event has an observation time; text edits also retain Telegram's edit timestamp. Duplicate polls do not create versions. Deletion preserves the last observed text and earlier versions; delayed events cannot resurrect a tombstone or overwrite a later edit. Unknown deletions create a metadata-only tombstone; later-arriving already-observed content can fill it without changing the deletion flag.
+
+The latest 100 history messages are reread for edits. Explicit saved-ID verification checks the latest 200 stored messages plus a rotating page of 100 older IDs per source, in batches of 100. Missing IDs are marked deleted only after a complete successful response, never inferred from history gaps or access errors. Unscoped basic-group deletions are matched only against a unique active basic chat, never against channel/supergroup ID spaces. Raw reaction updates are archived immediately, with organic and paid counts separated. Small-group service events and media-only posts are retained as metadata; files are not downloaded. Poll questions/options and captions are text. Protected/TTL content is redacted from both current records and versions.
+
+Telegram cannot supply historical versions or restore text deleted before observation. The journal starts with the initial import window; it does not claim a full prior archive. A v1 migration creates baseline snapshots of surviving data, not invented history.
 
 `FloodWait` pauses collection without blocking bot controls or delivery of completed digests. Failed source synchronization prevents the scheduled window from advancing. Partial digests and later supplements are not implemented yet; windows coalesce after recovery.
 
 ## Selection, language, and AI
 
-Extractive selection applies case-insensitive exclusions, then topics. Empty topics match everything. Texts equal after whitespace/case normalization are deduplicated. Ranking uses the number of topic matches, then recency. Up to 5000 latest messages are considered per window; capped windows are labeled. The default digest has at most 10 items.
+The builder partitions eligible input into a joint world-news stream for broadcast channels and an isolated stream for each group (including supergroups/forums). Each group carries participant IDs, reply/topic context and reaction counts; up to three archived parent levels are included as context, not counted as new activity. Deleted posts remain eligible, including old posts whose deletion was observed during the window. New edits and group reaction activity can bring older messages into the current window.
+
+Topic/exclusion filters are explicit owner preferences; empty topics match everything. AI input keeps repeated messages and speakers because duplication and discussion context matter. There is no 200/5000-message sampling cap. Extractive mode selects bounded excerpts separately per stream, prioritizing deleted and highly reacted posts; it cannot replace semantic synthesis.
 
 `/language en|ru` persists a client preference. English is the fallback for an older database without this field. Translated digest labels live in locale JSON resources, outside application logic. Extractive text remains in its original language; AI instructions select the client's requested output language. Changing language/settings during an in-flight build prevents queuing a stale result.
 
-AI filtering occurs before requests: only `ai_allowed=1` sources enter either backend. Server enablement and `/mode ai` do not grant all sources access. `/ai_source ID off` invalidates pending payloads. The offline `configure --enable-ai-for-folder` option is an explicit administrative opt-in for the currently selected folder's active sources.
+AI filtering occurs before requests: only `ai_allowed=1` sources enter either backend. Server enablement and `/mode ai` do not grant all sources access. `/ai_source ID off` invalidates pending payloads. `/ai_folder on|off` and offline `configure --enable-ai-for-folder` opt current and future members of the selected folder in or out. Switching folders resets inheritance to off. Per-source access can still be disabled; membership changes invalidate pending output.
 
 Backends:
 
@@ -44,7 +50,9 @@ Backends:
 
 The application verifies output shape, known reference IDs, and absence of generated URLs. Links are constructed from known source/message IDs. This is provenance/structure validation, not a proof of factual accuracy. Input messages remain untrusted data, never instructions for operating the VM.
 
-AI input selection round-robins across eligible sources rather than taking only the latest output-sized batch. Up to 200 candidates are considered, with a first-pass input share reserved per source. Actual serialized JSON size is bounded, including delimiters and escaping; the digest reports how many sources/messages entered the model. One AI request is made per digest, within daily-attempt and input-size limits. Failed attempts count. Individual message input is truncated at 5000 characters; aggregate material is bounded by `max_input_chars`. The HTTP backend requests at most 2500 output tokens; Codex uses the constrained output schema and request timeout. There is no multi-stage compression or embedding store yet.
+All eligible messages enter JSON-size-bounded batches. Long text is split without dropping characters. Each batch yields compact findings with original references; recursive reduction combines findings until a final synthesis fits one request. World-news instructions prioritize broad impact, changes, consequences and uncertainty across channels. Group instructions prioritize discussion topics, participant positions, decisions, open questions and high organic reaction counts relative to that chat. Paid reactions are separate; deletion/repetition is never proof of truth. Empty media is not interpreted as known content.
+
+Validated intermediate results are encrypted and cached by prompt, complete records, model/provider and language, allowing a failed build to resume. Every uncached call consumes the persistent daily attempt budget. Cache hits do not. If any stream fails, nothing from that build is enqueued and its scheduled boundary remains unchanged. All streams share one atomic outbox run. Source counts and input coverage are reported per stream, and `/status` exposes batch progress.
 
 ## Scheduling and outbox
 
@@ -60,11 +68,11 @@ Parts are sent sequentially. Confirmed `sent` parts are never automatically repe
 
 ## Storage and access
 
-SQLite WAL with short transactions on the event-loop thread. A filesystem session lock prevents concurrent reader/auth/configure processes. Operational `status` uses a read-only database connection. Metadata schema version is currently 1; language/settings additions need no table migration.
+SQLite WAL with short transactions on the event-loop thread. A filesystem session lock prevents concurrent reader/auth/configure processes. Operational `status` uses a read-only database connection. Metadata schema version is 2. Migration checks the encryption key first, then transactionally adds source classification, message details/deletion timestamps and baseline history. Back up before migration.
 
-Fernet encrypts message text and outbox payloads. Its key is separate in `secrets/data.key`. Technical metadata and settings remain plaintext. Telegram sessions, bot credentials, and Codex auth cache are private files, never image layers or Git content. The Codex executable is pinned and verified against the official archive SHA-256.
+Fernet encrypts message text, sender/media/reaction details, version snapshots, analysis cache and outbox payloads. Its key is separate in `secrets/data.key`. Technical metadata and settings remain plaintext. Telegram sessions, bot credentials, and Codex auth cache are private files, never image layers or Git content. The Codex executable is pinned and verified against the official archive SHA-256.
 
-Hourly cleanup expires text after 30 days by default, retaining minimal run keys for idempotency. `/purge` removes a disabled source's messages and all retained outbox text conservatively because summaries can combine sources. Delivered bot messages and external backups are outside this deletion path.
+Message/version retention defaults to unlimited (`retention_days=0`); positive values opt into finite retention. Hourly cleanup expires derived cache/outbox content after 30 days when the journal is unlimited, retaining run keys for idempotency. `/purge` removes a disabled source's messages and versions, clears derived cache and all retained outbox text conservatively because summaries can combine sources. Delivered bot messages and external backups are outside this deletion path.
 
 Owner pairing uses a one-time random bot command. Middleware checks numeric user ID and private chat ID; usernames are not authorization. All normal client settings are persisted in SQLite. TOML controls server paths/provider settings and only seeds client settings at first bootstrap.
 

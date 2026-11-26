@@ -21,7 +21,7 @@ class Owner(StrictModel):
 class Storage(StrictModel):
     database_path: Path = Path("data/ufifeed.sqlite3")
     key_path: Path = Path("secrets/data.key")
-    retention_days: int = Field(default=30, ge=1, le=365)
+    retention_days: int = Field(default=0, ge=0, le=365)
 
 
 class Telegram(StrictModel):
