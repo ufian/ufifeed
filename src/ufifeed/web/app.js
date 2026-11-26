@@ -57,7 +57,7 @@ function render() {
   }));
   $("prepare").disabled = state.busy;
   const progress = state.ai_progress;
-  $("job-status").textContent = state.busy ? (progress?.input_batches ? `Reading batch ${Math.min(progress.completed_batches + 1, progress.input_batches)} of ${progress.input_batches}…` : "Preparing your briefing…") : state.manual_job?.state === "queued" ? "Preview prepared and queued in Telegram." : "A preview arrives in your Telegram chat.";
+  $("job-status").textContent = state.busy && state.reader_retry_at && new Date(state.reader_retry_at) > new Date() ? `Waiting for Telegram until ${date(state.reader_retry_at)}.` : state.busy ? (progress?.input_batches ? `Reading batch ${Math.min(progress.completed_batches + 1, progress.input_batches)} of ${progress.input_batches}…` : "Preparing your briefing…") : state.manual_job?.state === "queued" ? "Preview prepared and queued in Telegram." : "A preview arrives in your Telegram chat.";
   $("service-error").hidden = !state.error;
   $("service-error").textContent = state.error || "";
   $("schedule-label").textContent = state.schedule.enabled ? state.schedule.times.join(" · ") : "Schedule paused";

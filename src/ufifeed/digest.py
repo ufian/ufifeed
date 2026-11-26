@@ -17,7 +17,7 @@ from ufifeed.codex_provider import complete as codex_complete
 from ufifeed.config import Config, Credentials, Schedule
 from ufifeed.language import LANGUAGES, digest_labels, language_code
 from ufifeed.store import Store
-from ufifeed.timeutil import latest_slot, stamp, utcnow
+from ufifeed.timeutil import latest_slot, parse, stamp, utcnow
 
 
 class DigestError(Exception):
@@ -490,8 +490,14 @@ class Digests:
 
     async def manual(self) -> int | None:
         async with self.lock:
-            if not await self.reader.sync_all():
-                raise DigestError("Collection is incomplete. Check /status and try later.")
+            for attempt in range(3):
+                if await self.reader.sync_all():
+                    break
+                retry_at = self.store.get("reader_retry_at")
+                delay = (parse(retry_at) - utcnow()).total_seconds() + 1 if retry_at else 0
+                if attempt == 2 or not 0 < delay <= 120:
+                    raise DigestError("Collection is incomplete. Check /status and try later.")
+                await asyncio.sleep(delay)
             end = utcnow()
             signature = self.store.input_signature()
             start = max(

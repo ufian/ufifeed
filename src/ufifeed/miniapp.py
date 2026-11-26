@@ -222,6 +222,7 @@ class MiniApp:
             "busy": self.controls.digests.lock.locked()
             or bool(self.digest_task and not self.digest_task.done()),
             "ai_progress": self.store.get("ai_progress"),
+            "reader_retry_at": self.store.get("reader_retry_at"),
             "last_ai_input": self.store.get("last_ai_input"),
             "error": self.store.get("digest_error") or self.store.get("folder_error"),
             "manual_job": self.store.get("manual_job"),
@@ -271,6 +272,7 @@ class MiniApp:
         return web.json_response({"message": result})
 
     async def _prepare_digest(self):
+        self.store.set("digest_error", None)
         self.store.set("manual_job", {"state": "running", "requested_at": stamp(utcnow())})
         try:
             run_id = await self.controls.digests.manual()

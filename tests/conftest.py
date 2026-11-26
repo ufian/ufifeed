@@ -44,3 +44,9 @@ def store(config):
 @pytest.fixture
 def item():
     return {"id": 10, "date": utcnow() - timedelta(minutes=10), "text": "Important release"}
+
+
+@pytest.fixture(autouse=True)
+def skip_production_history_pacing(monkeypatch):
+    # Synthetic clients never call Telegram; don't spend real time on network rate limits.
+    monkeypatch.setattr("ufifeed.reader.HISTORY_INTERVAL_SECONDS", 0)

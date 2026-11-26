@@ -31,7 +31,7 @@ The latest 100 history messages are reread for edits. Explicit saved-ID verifica
 
 Telegram cannot supply historical versions or restore text deleted before observation. The journal starts with the initial import window; it does not claim a full prior archive. A v1 migration creates baseline snapshots of surviving data, not invented history.
 
-`FloodWait` pauses collection without blocking bot controls or delivery of completed digests. Failed source synchronization prevents the scheduled window from advancing. Partial digests and later supplements are not implemented yet; windows coalesce after recovery.
+History requests share a 3.2-second pacing gate; pagination is paced too. Concurrent synchronization requests waiting on an ongoing successful pass reuse that pass. `FloodWait` pauses collection without blocking bot controls or delivery of completed digests. The retry timestamp is persisted across restarts; the collector wakes after the pause, and manual previews wait through up to two short pauses (at most 120 seconds each) before reporting incomplete collection. Failed source synchronization prevents the scheduled window from advancing. Partial digests and later supplements are not implemented yet; windows coalesce after recovery.
 
 ## Selection, language, and AI
 

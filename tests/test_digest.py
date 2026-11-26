@@ -390,3 +390,22 @@ async def test_group_briefings_are_brief_and_details_are_collapsible(
     )
     assert "<b>Transit changes divided the group</b>\n<blockquote expandable>" in parts[0]
     assert "</blockquote>" in parts[0]
+
+
+async def test_manual_preview_waits_for_telegram_cooldown_before_retry(
+    store, config, credentials, item, monkeypatch
+):
+    from datetime import timedelta
+
+    from ufifeed.timeutil import stamp
+
+    store.upsert_live(-1000000000123, item)
+    store.set("reader_retry_at", stamp(utcnow() + timedelta(seconds=20)))
+    reader = SimpleNamespace(sync_all=AsyncMock(side_effect=[False, True]))
+    pause = AsyncMock()
+    monkeypatch.setattr("ufifeed.digest.asyncio.sleep", pause)
+    before = store.last_window_end()
+    run = await Digests(config, credentials, store, reader).manual()
+    assert run and reader.sync_all.await_count == 2
+    assert 0 < pause.await_args.args[0] <= 21
+    assert store.last_window_end() == before

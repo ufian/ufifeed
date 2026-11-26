@@ -58,7 +58,7 @@ port = 8082
 
 Deploy with `scripts/deploy.sh`. Compose publishes 8082 only on VM loopback. If changing the internal port, update both Compose and the tunnel mapping. Startup configures the owner's private menu button automatically using the existing bot token. An optional Main App/profile button can use the same URL in BotFather.
 
-The initial schedule remains disabled until the owner selects delivery times. Full-window multi-stage AI analysis uses multiple requests per digest; the default daily attempt cap is 100. Provider account limits also apply. Failed analysis retains messages/cache and does not enqueue partial summaries or advance the window.
+The initial schedule remains disabled until the owner selects delivery times. Full-window multi-stage AI analysis uses multiple requests per digest; the default daily attempt cap is 100. Provider account limits also apply. Failed analysis retains messages/cache and does not enqueue partial summaries or advance the window. History requests are paced, unchanged snapshots are not rewritten, and overlap pages commit together to keep HTTP responsive. A Telegram cooldown is persisted and displayed during preparation; short pauses are retried automatically.
 
 ## Verification and recovery
 

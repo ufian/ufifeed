@@ -89,3 +89,43 @@ async def test_changed_folder_requires_its_own_successful_sync(store, config, cr
     # Simulate an in-flight refresh for the previous folder noticing the change and returning.
     reader.refresh_folder = AsyncMock(return_value=None)
     assert not await reader.sync_all()
+
+
+async def test_persisted_flood_pause_prevents_requests_after_restart(store, config, credentials):
+    from ufifeed.timeutil import stamp
+
+    store.set("folder_id", 214)
+    store.set("reader_retry_at", stamp(utcnow() + timedelta(seconds=60)))
+    reader = Reader(config, credentials, store)
+    reader.refresh_folder = AsyncMock()
+    reader.reconcile = AsyncMock()
+    assert not await reader.sync_all()
+    reader.refresh_folder.assert_not_awaited()
+    store.set("reader_retry_at", stamp(utcnow() - timedelta(seconds=1)))
+    assert await reader.sync_all()
+    reader.refresh_folder.assert_awaited_once()
+    assert store.get("reader_retry_at") is None
+
+
+async def test_concurrent_collection_requests_share_the_completed_pass(store, config, credentials):
+    import asyncio
+
+    store.set("folder_id", 214)
+    reader = Reader(config, credentials, store)
+    gate = asyncio.Event()
+
+    async def refresh():
+        await gate.wait()
+
+    async def reconcile(source):
+        store.synced(source["id"], utcnow())
+
+    reader.refresh_folder = AsyncMock(side_effect=refresh)
+    reader.reconcile = AsyncMock(side_effect=reconcile)
+    first = asyncio.create_task(reader.sync_all())
+    await asyncio.sleep(0)
+    second = asyncio.create_task(reader.sync_all())
+    await asyncio.sleep(0)
+    gate.set()
+    assert await asyncio.gather(first, second) == [True, True]
+    reader.reconcile.assert_awaited_once()

@@ -11,9 +11,10 @@ from telethon import TelegramClient, errors, events, functions, types, utils
 
 from ufifeed.config import Config, Credentials
 from ufifeed.store import Store
-from ufifeed.timeutil import parse, utcnow
+from ufifeed.timeutil import parse, stamp, utcnow
 
 log = logging.getLogger(__name__)
+HISTORY_INTERVAL_SECONDS = 3.2
 
 
 class ReaderError(Exception):
@@ -125,6 +126,8 @@ class Reader:
         self.entities: dict[int, Any] = {}
         self.blocked_until = 0.0
         self.last_cycle = 0.0
+        self.last_success = 0.0
+        self.history_next = 0.0
         self.client.add_event_handler(self.on_message, events.NewMessage())
         self.client.add_event_handler(self.on_message, events.MessageEdited())
         self.client.add_event_handler(self.on_delete, events.MessageDeleted())
@@ -277,6 +280,15 @@ class Reader:
                 if len(matches) == 1:
                     self.store.delete_messages(matches[0][0], [msg_id])
 
+    async def history_pause(self) -> None:
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(max(0, self.history_next - loop.time()))
+        self.history_next = loop.time() + HISTORY_INTERVAL_SECONDS
+
+    def flood_pause(self, seconds: int) -> None:
+        self.blocked_until = asyncio.get_running_loop().time() + seconds
+        self.store.set("reader_retry_at", stamp(utcnow() + timedelta(seconds=seconds)))
+
     async def reconcile(self, source: dict) -> None:
         source_id = source["id"]
         entity = self.entities.get(source_id) or await self.client.get_entity(source_id)
@@ -285,15 +297,21 @@ class Reader:
             raise ReaderError("This source has protected content; collection is disabled.")
         started = utcnow()
         cursor = source["cursor"]
+        await self.history_pause()
         newest = await self.client.get_messages(entity, limit=1)
         snapshot_id = newest[0].id if newest else cursor
-        kwargs: dict[str, Any] = {"reverse": True, "limit": None}
+        kwargs: dict[str, Any] = {
+            "reverse": True,
+            "limit": None,
+            "wait_time": HISTORY_INTERVAL_SECONDS,
+        }
         kwargs["max_id"] = snapshot_id + 1
         if source["initialized"] or cursor:
             kwargs["min_id"] = cursor
         else:
             kwargs["offset_date"] = parse(source["since"])
         page, seen = [], 0
+        await self.history_pause()
         async for message in self.client.iter_messages(entity, **kwargs):
             if not any(s["id"] == source_id for s in self.store.sources()):
                 return
@@ -309,8 +327,16 @@ class Reader:
                 page = []
                 await asyncio.sleep(0)
         self.store.commit_page(source_id, page, max(cursor, snapshot_id))
+        self.history_next = asyncio.get_running_loop().time() + HISTORY_INTERVAL_SECONDS
         # Re-read a bounded recent overlap for edits/deletions missed while offline.
-        recent = [m async for m in self.client.iter_messages(entity, limit=100)]
+        await self.history_pause()
+        recent = [
+            m
+            async for m in self.client.iter_messages(
+                entity, limit=100, wait_time=HISTORY_INTERVAL_SECONDS
+            )
+        ]
+        self.history_next = asyncio.get_running_loop().time() + HISTORY_INTERVAL_SECONDS
         refreshed = []
         for message in recent:
             data = message_data(message)
@@ -349,14 +375,27 @@ class Reader:
         self.store.synced(source_id, started)
 
     async def sync_all(self) -> bool:
+        loop = asyncio.get_running_loop()
+        requested = loop.time()
         async with self.lock:
-            loop = asyncio.get_running_loop()
+            if (
+                self.last_success >= requested
+                and not self.store.get("folder_error")
+                and self.store.get("folder_synced_at")
+                and all(s["initialized"] and not s["error"] for s in self.store.sources())
+            ):
+                return True
+            retry_at = self.store.get("reader_retry_at")
+            if retry_at and parse(retry_at) > utcnow():
+                return False
+            if retry_at:
+                self.store.set("reader_retry_at", None)
             if self.blocked_until > loop.time():
                 return False
             try:
                 await self.refresh_folder()
             except errors.FloodWaitError as exc:
-                self.blocked_until = loop.time() + exc.seconds
+                self.flood_pause(exc.seconds)
                 self.store.set("folder_error", f"FloodWait: {exc.seconds}s")
                 return False
             except ReaderError as exc:
@@ -375,7 +414,7 @@ class Reader:
                 try:
                     await self.reconcile(source)
                 except errors.FloodWaitError as exc:
-                    self.blocked_until = loop.time() + exc.seconds
+                    self.flood_pause(exc.seconds)
                     self.store.source_error(source["id"], f"FloodWait: {exc.seconds}s")
                     return False
                 except ReaderError as exc:
@@ -386,15 +425,20 @@ class Reader:
                     log.warning("Source %s sync failed: %s", source["id"], type(exc).__name__)
                     okay = False
             self.last_cycle = loop.time()
+            if okay:
+                self.last_success = self.last_cycle
+                self.store.set("reader_retry_at", None)
             return okay
 
     async def run(self) -> None:
         while True:
             self.wake.clear()
             await self.sync_all()
+            delay = self.config.telegram.reconcile_interval_seconds
+            retry_at = self.store.get("reader_retry_at")
+            if retry_at:
+                delay = min(delay, max(1, (parse(retry_at) - utcnow()).total_seconds() + 1))
             try:
-                await asyncio.wait_for(
-                    self.wake.wait(), self.config.telegram.reconcile_interval_seconds
-                )
+                await asyncio.wait_for(self.wake.wait(), delay)
             except TimeoutError:
                 pass
