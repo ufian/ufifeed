@@ -206,3 +206,15 @@ async def test_incomplete_verification_does_not_invent_deletions(store, config, 
     with pytest.raises(ReaderError, match="Incomplete"):
         await reader.reconcile(store.sources()[0])
     assert store.journal_stats()["deleted"] == 0
+
+
+async def test_channel_service_events_are_journaled_live(store, config, credentials):
+    reader = Reader(config, credentials, store)
+    message = types.MessageService(
+        id=12, peer_id=types.PeerChannel(123), date=utcnow(), action=types.MessageActionPinMessage()
+    )
+    await reader.on_raw(types.UpdateNewChannelMessage(message, pts=1, pts_count=1))
+    assert store.journal_stats()["messages"] == 1
+    assert (
+        store.message_history(SOURCE, 12)[0]["payload"]["media_kind"] == "MessageActionPinMessage"
+    )

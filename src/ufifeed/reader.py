@@ -216,9 +216,9 @@ class Reader:
             self.store.redact(source_id, event.id)
 
     async def on_raw(self, update: Any) -> None:
-        if isinstance(update, types.UpdateNewMessage) and isinstance(
-            update.message, types.MessageService
-        ):
+        if isinstance(
+            update, (types.UpdateNewMessage, types.UpdateNewChannelMessage)
+        ) and isinstance(update.message, types.MessageService):
             message = update.message
             await self.on_message(
                 SimpleNamespace(

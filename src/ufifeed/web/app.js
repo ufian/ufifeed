@@ -3,6 +3,7 @@ const $ = (id) => document.getElementById(id);
 const tg = window.Telegram?.WebApp;
 let state, page = "overview", dirty = false, formRevision, journalCursor = null;
 let historyCursor = null, historyMessage = null, timer, journalRequest = 0;
+let briefingSignature = "";
 const node = (tag, text, className) => {
   const el = document.createElement(tag);
   if (text !== undefined) el.textContent = text;
@@ -60,17 +61,27 @@ function render() {
   $("service-error").hidden = !state.error;
   $("service-error").textContent = state.error || "";
   $("schedule-label").textContent = state.schedule.enabled ? state.schedule.times.join(" · ") : "Schedule paused";
-  $("briefings").replaceChildren();
+  const digestSignature = JSON.stringify([state.digests, state.schedule.timezone]);
+  if (digestSignature !== briefingSignature) {
+    const expanded = new Set([...$("briefings").querySelectorAll("details[open]")].map(el => el.dataset.key));
+    $("briefings").replaceChildren();
   for (const run of state.digests) {
     const card = node("article", undefined, "digest-card");
     const meta = node("div", undefined, "digest-meta"); meta.append(node("span", date(run.created_at)), node("span", [...new Set(run.parts.map(p => p.status))].join(" · ")));
     card.append(meta);
-    for (const part of run.parts) {
-      const body = node("div", undefined, "digest-text"); body.append(safeDigest(part.text || "This briefing has expired.")); card.append(body);
+    for (const [partIndex, part] of run.parts.entries()) {
+      const body = node("div", undefined, "digest-text"); body.append(safeDigest(part.text || "This briefing has expired."));
+      for (const [index, details] of [...body.querySelectorAll("details")].entries()) {
+        details.dataset.key = `${run.id}:${partIndex}:${index}`;
+        details.open = expanded.has(details.dataset.key);
+      }
+      card.append(body);
     }
     $("briefings").append(card);
   }
   if (!state.digests.length) $("briefings").append(node("div", "Your first briefing will appear here. Prepare a preview to get started.", "empty"));
+    briefingSignature = digestSignature;
+  }
   renderSources();
   if (!dirty) renderSettings();
   const selected = $("journal-source").value;
