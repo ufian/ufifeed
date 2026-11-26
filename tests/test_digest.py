@@ -38,8 +38,9 @@ def test_html_and_emoji_parts_stay_below_telegram_limit():
 
 
 def test_only_telegram_source_links_are_constructed():
-    assert message_link({"source_id": -100123, "id": 5}) == "https://t.me/c/123/5"
+    assert message_link({"source_id": -1000000000123, "id": 5}) == "https://t.me/c/123/5"
     assert message_link({"source_id": -42, "id": 5}) is None
+    assert message_link({"source_id": -100123, "id": 5}) is None
     assert message_link({"username": 'x" onload="bad', "source_id": -42, "id": 5}) is None
 
 
@@ -48,17 +49,17 @@ async def test_ai_sources_filtered_before_provider_request(
 ):
     config.ai.enabled, config.ai.model = True, "test-model"
     store.set("mode", "ai")
-    store.upsert_live(-100123, {**item, "text": "private forbidden source"})
+    store.upsert_live(-1000000000123, {**item, "text": "private forbidden source"})
     store.sync_folder(
         [
-            {"id": -100123, "title": "Forbidden"},
-            {"id": -100456, "title": "Allowed"},
+            {"id": -1000000000123, "title": "Forbidden"},
+            {"id": -1000000000456, "title": "Allowed"},
         ],
         item["date"],
     )
-    store.conn.execute("UPDATE sources SET ai_allowed=1 WHERE id=-100456")
+    store.conn.execute("UPDATE sources SET ai_allowed=1 WHERE id=-1000000000456")
     store.conn.commit()
-    store.upsert_live(-100456, {**item, "text": "allowed post"})
+    store.upsert_live(-1000000000456, {**item, "text": "allowed post"})
     requests = []
 
     def handler(request):
@@ -105,7 +106,7 @@ async def test_ai_rejects_unknown_citations_and_does_not_enqueue(
     store.set("mode", "ai")
     store.conn.execute("UPDATE sources SET ai_allowed=1")
     store.conn.commit()
-    store.upsert_live(-100123, item)
+    store.upsert_live(-1000000000123, item)
     client = httpx.AsyncClient
     monkeypatch.setattr(
         "ufifeed.digest.httpx.AsyncClient",
@@ -142,7 +143,7 @@ async def test_ai_permission_check_and_daily_budget(store, config, credentials):
 
 
 async def test_manual_digest_keeps_automatic_window(store, config, credentials, item):
-    store.upsert_live(-100123, item)
+    store.upsert_live(-1000000000123, item)
     before = store.last_window_end()
     reader = SimpleNamespace(sync_all=AsyncMock(return_value=True))
     await Digests(config, credentials, store, reader).manual()

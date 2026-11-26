@@ -44,7 +44,7 @@ async def test_empty_initial_window_never_imports_old_history_on_second_sync(
         if kwargs.get("limit") == 100:
             yield old
 
-    reader.entities[-100123] = SimpleNamespace(noforwards=False)
+    reader.entities[-1000000000123] = SimpleNamespace(noforwards=False)
     reader.client = SimpleNamespace(
         get_messages=AsyncMock(return_value=[old]), iter_messages=history
     )
@@ -65,10 +65,10 @@ async def test_live_event_during_backfill_does_not_skip_middle_messages(store, c
         if kwargs.get("limit") == 100:
             return
         yield first
-        await reader.on_message(SimpleNamespace(chat_id=-100123, message=live, id=100))
+        await reader.on_message(SimpleNamespace(chat_id=-1000000000123, message=live, id=100))
         yield second
 
-    reader.entities[-100123] = SimpleNamespace(noforwards=False)
+    reader.entities[-1000000000123] = SimpleNamespace(noforwards=False)
     reader.client = SimpleNamespace(
         get_messages=AsyncMock(return_value=[second]), iter_messages=history
     )

@@ -34,7 +34,8 @@ def store(config):
     db = Store.open(config)
     db.bootstrap(config)
     db.sync_folder(
-        [{"id": -100123, "title": "Source", "username": "source"}], utcnow() - timedelta(hours=24)
+        [{"id": -1000000000123, "title": "Source", "username": "source"}],
+        utcnow() - timedelta(hours=24),
     )
     yield db
     db.close()

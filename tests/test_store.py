@@ -9,11 +9,11 @@ from ufifeed.timeutil import utcnow
 
 def test_live_update_does_not_skip_history_and_edits_replace_text(store, item):
     live = {**item, "id": 100, "text": "live secret"}
-    store.upsert_live(-100123, live)
+    store.upsert_live(-1000000000123, live)
     assert store.sources()[0]["cursor"] == 0
-    store.commit_page(-100123, [item], 10)
+    store.commit_page(-1000000000123, [item], 10)
     assert store.sources()[0]["cursor"] == 10
-    store.commit_page(-100123, [{**item, "text": "edited secret"}], 10)
+    store.commit_page(-1000000000123, [{**item, "text": "edited secret"}], 10)
     rows = store.candidates(item["date"] - timedelta(seconds=1), utcnow())
     assert len(rows) == 2
     assert {r["text"] for r in rows} == {"edited secret", "live secret"}
@@ -40,17 +40,17 @@ def test_outbox_survives_restart_and_unknown_blocks_later_parts(store, item):
 
 
 def test_remove_from_folder_stops_candidates_and_readd_bootstraps(store, item):
-    store.upsert_live(-100123, item)
-    store.commit_page(-100123, [], 100)
+    store.upsert_live(-1000000000123, item)
+    store.commit_page(-1000000000123, [], 100)
     store.sync_folder([], utcnow())
     assert not store.candidates(item["date"], utcnow())
-    store.sync_folder([{"id": -100123, "title": "Source"}], utcnow())
+    store.sync_folder([{"id": -1000000000123, "title": "Source"}], utcnow())
     assert store.sources()[0]["cursor"] == 0
     assert not store.sources()[0]["initialized"]
 
 
 def test_retention_erases_content_but_keeps_idempotency_keys(store, item):
-    store.upsert_live(-100123, item)
+    store.upsert_live(-1000000000123, item)
     now = utcnow()
     store.enqueue("slot", item["date"], now, "extractive", ["secret"], advance=True)
     store.cleanup(1, now + timedelta(days=2))

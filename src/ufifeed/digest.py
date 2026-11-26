@@ -24,9 +24,10 @@ def message_link(item: dict) -> str | None:
     username = item.get("username")
     if username and re.fullmatch(r"[A-Za-z0-9_]{1,32}", username):
         return f"https://t.me/{username}/{int(item['id'])}"
-    source_id = str(item["source_id"])
-    if source_id.startswith("-100"):
-        return f"https://t.me/c/{source_id[4:]}/{int(item['id'])}"
+    source_id = int(item["source_id"])
+    if source_id < -1_000_000_000_000:
+        channel_id = -source_id - 1_000_000_000_000
+        return f"https://t.me/c/{channel_id}/{int(item['id'])}"
     return None
 
 
