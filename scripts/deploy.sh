@@ -37,5 +37,6 @@ else
   echo "Image ready. App was stopped; leaving it stopped. Complete auth before starting it."
 fi
 ln -sfn "$release" "$base/current"
+install -m 755 "$release/scripts/vm-compose.sh" "$base/compose"
 echo "Release prepared: $revision"
 REMOTE
