@@ -311,29 +311,41 @@ class Reader:
         self.store.commit_page(source_id, page, max(cursor, snapshot_id))
         # Re-read a bounded recent overlap for edits/deletions missed while offline.
         recent = [m async for m in self.client.iter_messages(entity, limit=100)]
+        refreshed = []
         for message in recent:
             data = message_data(message)
             if data and data["date"] >= parse(source["since"]):
-                self.store.upsert_live(source_id, data)
+                refreshed.append(data)
             elif not data:
                 self.store.redact(source_id, message.id)
+        self.store.refresh_page(source_id, refreshed)
         # Detect missed deletions by querying known IDs, never by interpreting history gaps.
-        ids = self.store.verification_ids(source_id)
+        ids, verification_cursor = self.store.verification_ids(source_id)
         for offset in range(0, len(ids), 100):
             batch = ids[offset : offset + 100]
             found = await self.client.get_messages(entity, ids=batch)
             # A malformed/partial result must not turn into false deletion records.
             if len(found) != len(batch):
                 raise ReaderError("Incomplete message verification response")
+            if any(
+                message is not None
+                and not isinstance(message, types.MessageEmpty)
+                and message.id != msg_id
+                for msg_id, message in zip(batch, found, strict=True)
+            ):
+                raise ReaderError("Unexpected message verification ID")
+            refreshed, deleted = [], []
             for msg_id, message in zip(batch, found, strict=True):
                 if message is None or isinstance(message, types.MessageEmpty):
-                    self.store.delete_messages(source_id, [msg_id])
-                elif message.id != msg_id:
-                    raise ReaderError("Unexpected message verification ID")
+                    deleted.append(msg_id)
                 elif data := message_data(message):
-                    self.store.upsert_live(source_id, data)
+                    refreshed.append(data)
                 else:
                     self.store.redact(source_id, msg_id)
+            self.store.refresh_page(source_id, refreshed)
+            self.store.delete_messages(source_id, deleted)
+            await asyncio.sleep(0)
+        self.store.set(f"verify:{source_id}", verification_cursor)
         self.store.synced(source_id, started)
 
     async def sync_all(self) -> bool:

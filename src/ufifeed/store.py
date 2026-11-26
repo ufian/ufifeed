@@ -295,6 +295,13 @@ class Store:
             details.get(k) != old_details.get(k)
             for k in ("reactions", "reaction_count", "paid_reactions")
         )
+        if (
+            previous
+            and not changed
+            and not reactions_changed
+            and previous["date"] == stamp(item["date"])
+        ):
+            return
         reaction_at = (
             stamp(utcnow())
             if reactions_changed
@@ -353,6 +360,12 @@ class Store:
         with self.conn:
             self.save_message(source_id, item)
         # Live updates MUST NOT advance the history cursor.
+
+    def refresh_page(self, source_id: int, items: list[dict]) -> None:
+        """Persist a history overlap with one durable commit, without moving its cursor."""
+        with self.conn:
+            for item in items:
+                self.save_message(source_id, item)
 
     def commit_page(self, source_id: int, items: list[dict], cursor: int) -> None:
         with self.conn:
@@ -414,7 +427,7 @@ class Store:
             self._set("content_epoch", self.get("content_epoch", 0) + 1)
             self._invalidate_pending()
 
-    def verification_ids(self, source_id: int) -> list[int]:
+    def verification_ids(self, source_id: int) -> tuple[list[int], int]:
         recent = [
             r[0]
             for r in self.conn.execute(
@@ -432,8 +445,7 @@ class Store:
                 (source_id, cursor),
             )
         ]
-        self.set(f"verify:{source_id}", older[-1] if older else 0)
-        return sorted(set(recent + older))
+        return sorted(set(recent + older)), older[-1] if older else 0
 
     def candidates(self, start: datetime, end: datetime) -> list[dict]:
         rows = self.conn.execute(

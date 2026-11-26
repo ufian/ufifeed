@@ -206,6 +206,7 @@ async def test_incomplete_verification_does_not_invent_deletions(store, config, 
     with pytest.raises(ReaderError, match="Incomplete"):
         await reader.reconcile(store.sources()[0])
     assert store.journal_stats()["deleted"] == 0
+    assert store.get(f"verify:{SOURCE}", 0) == 0
 
 
 async def test_channel_service_events_are_journaled_live(store, config, credentials):
@@ -218,3 +219,12 @@ async def test_channel_service_events_are_journaled_live(store, config, credenti
     assert (
         store.message_history(SOURCE, 12)[0]["payload"]["media_kind"] == "MessageActionPinMessage"
     )
+
+
+def test_reconciliation_does_not_rewrite_unchanged_ciphertext(store, item):
+    store.upsert_live(SOURCE, item)
+    before = store.conn.total_changes
+    store.refresh_page(SOURCE, [item] * 200)
+    assert store.conn.total_changes == before
+    assert store.sources()[0]["cursor"] == 0
+    assert store.journal_stats()["events"] == 1
