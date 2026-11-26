@@ -129,6 +129,7 @@ def render_parts(
 
 class AISummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    title: str = Field(default="", max_length=120)
     text: str = Field(min_length=1, max_length=1200)
     refs: list[int] = Field(min_length=1, max_length=5)
 
@@ -150,7 +151,13 @@ async def analyze(
     final: bool,
 ) -> list[dict]:
     limit = config.digest.max_items if final else min(30, max(1, config.ai.max_input_chars // 500))
-    text_limit = 1200 if final else min(600, max(80, config.ai.max_input_chars // (limit * 4)))
+    if final and profile == "group":
+        limit = min(limit, 3)
+    text_limit = (
+        (320 if profile == "group" else 1200)
+        if final
+        else min(600, max(80, config.ai.max_input_chars // (limit * 4)))
+    )
     objective = (
         "Combine reporting from ALL channels into an overall picture of important world events. "
         "Prioritize changes with broad impact, explain what changed, why it matters and likely "
@@ -162,6 +169,11 @@ async def analyze(
         "attention to messages with many organic reactions relative to this chat; describe what "
         "prompted the response. Reaction counts are not unique voters or proof of agreement. "
         "Paid reactions are a separate signal. Do not mix this group's discussion with other chats."
+        " State the substance directly in plain conversational language. No introductory framing, "
+        "filler, formal report language or stock conclusions. Do not say that the chat discussed "
+        "something: say what people argued about or decided. In the final summary keep only 1–3 "
+        "important topics, each with a concrete short title and 1–2 short sentences of details. "
+        "Do not invent outcomes, implications or next steps. Skip trivial chatter."
     )
     system = (
         f"Write in {LANGUAGES[language]}. {objective} "
@@ -178,13 +190,16 @@ async def analyze(
             "deleted material, discussion outcomes and reaction signals with original references. "
         )
         + f"Return at most {limit} points, at most {text_limit} characters per point. "
-        'Return only JSON: {"items":[{"text":"finding","refs":[1,2]}]}. '
+        'Return only JSON: {"items":[{"title":"short informative headline",'
+        '"text":"details and implications","refs":[1,2]}]}. '
+        "The title and details must both use the requested language. "
+        "Use a concrete 4–8 word title and plain text without markup. "
         "Cite original message references from ref or refs fields only."
     )
     key = hashlib.sha256(
         json.dumps(
             {
-                "version": 3,
+                "version": 4,
                 "prompt": system,
                 "records": records,
                 "provider": config.ai.provider,
@@ -204,6 +219,9 @@ async def analyze(
             "The daily AI request limit is exhausted (00:00 UTC reset). Partial analysis is saved."
         )
     schema = AIResult.model_json_schema()
+    schema["$defs"]["AISummary"]["required"] = ["title", "text", "refs"]
+    schema["$defs"]["AISummary"]["properties"]["title"]["minLength"] = 1
+    schema["$defs"]["AISummary"]["properties"]["title"].pop("default", None)
     schema["$defs"]["AISummary"]["properties"]["text"]["maxLength"] = text_limit
     schema["properties"]["items"]["maxItems"] = limit
     headers = {}
@@ -237,7 +255,7 @@ async def analyze(
         for item in parsed.items:
             if not set(item.refs) <= allowed or len(item.text) > text_limit:
                 raise ValueError("Invalid AI references or output size")
-            if re.search(r"(?:https?://|t\.me/|www\.)", item.text, re.I):
+            if re.search(r"(?:https?://|t\.me/|www\.)", item.title + " " + item.text, re.I):
                 raise ValueError("AI generated an unexpected URL")
         result = [item.model_dump() for item in parsed.items]
         store.cache_put(key, result)
@@ -366,7 +384,11 @@ async def summarize(
             )
         result = findings
     return [
-        {"text": item["text"], "sources": [originals[ref] for ref in dict.fromkeys(item["refs"])]}
+        {
+            "title": item.get("title", ""),
+            "text": item["text"],
+            "sources": [originals[ref] for ref in dict.fromkeys(item["refs"])],
+        }
         for item in result
     ]
 
@@ -441,7 +463,13 @@ class Digests:
                     if original.get("reaction_count"):
                         citation += f" [♥ {original['reaction_count']}]"
                     sources.append(citation)
-                entries.append(escaped_clip(summary["text"], 1500) + "\n" + "; ".join(sources))
+                title = summary.get("title") or summary["text"].splitlines()[0][:120]
+                entries.append(
+                    f"<b>{escaped_clip(title, 300)}</b>\n"
+                    f"<blockquote expandable>{escaped_clip(summary['text'], 1500)}\n"
+                    + "; ".join(sources)
+                    + "</blockquote>"
+                )
             if not entries:
                 entries = [labels["empty"]]
             parts.extend(

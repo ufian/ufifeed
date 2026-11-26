@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Ufifeed</title>
+  <link rel="stylesheet" href="./assets/app.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script defer src="./assets/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead"><div><span class="eyebrow">YOUR DAILY PERSPECTIVE</span><h1>ufifeed<span class="brand-dot">.</span></h1></div><span class="private-badge">Private</span></header>
+    <div id="notice" role="status" hidden></div>
+    <main id="welcome"><h2>Your signal, in focus.</h2><p>Open Ufifeed from your Telegram bot to read your briefings, follow discussions and explore the message journal.</p></main>
+    <div id="application" hidden>
+      <nav class="tabs" aria-label="Main navigation">
+        <button data-page="overview" aria-current="page">Briefings</button><button data-page="journal">Journal</button><button data-page="sources">Sources</button><button data-page="settings">Settings</button>
+      </nav>
+      <main>
+        <section id="overview" class="page">
+          <div class="section-heading"><div><span id="folder-label" class="eyebrow">YOUR READING LIST</span><h2>The bigger picture</h2></div><button id="refresh" class="icon-button" aria-label="Refresh">↻</button></div>
+          <p class="intro">World events together. Every discussion in its own context.</p>
+          <div id="metrics" class="metrics"></div>
+          <div class="action-card"><div><strong>A fresh perspective</strong><p id="job-status">A preview arrives in your Telegram chat.</p></div><button id="prepare" class="primary">Prepare digest</button></div>
+          <div id="service-error" class="warning" hidden></div>
+          <div class="section-heading"><h3>Recent briefings</h3><span id="schedule-label" class="muted"></span></div>
+          <div id="briefings" class="stack"></div>
+        </section>
+        <section id="journal" class="page" hidden>
+          <div class="section-heading"><div><span class="eyebrow">THE MESSAGE RECORD</span><h2>Nothing out of context</h2></div></div>
+          <p class="intro">Observed messages, their edits and deletions. Open a message’s versions to see what changed.</p>
+          <div class="filters"><label>Source<select id="journal-source"><option value="">All sources</option></select></label><label class="check"><input id="deleted-only" type="checkbox"> Deleted only</label></div>
+          <div id="messages" class="stack"></div><button id="more-messages" class="secondary wide" hidden>Load more messages</button>
+        </section>
+        <section id="sources" class="page" hidden>
+          <span class="eyebrow">CURATE YOUR INPUT</span><h2>Your sources</h2><p class="intro">Maintain the folder in the reader account. Channels inform the world briefing; each group gets its own discussion summary.</p>
+          <div class="panel"><div class="section-heading"><h3 id="current-folder">Reader folder</h3><button id="load-folders" class="secondary">Choose folder</button></div><div id="folder-picker" hidden><label>Folder<select id="folder-select"></select></label><button id="choose-folder" class="primary">Use this folder</button></div><label class="check"><input id="folder-ai" type="checkbox"> AI for all current and future folder sources</label><p class="muted">AI access shares source content with the configured AI provider.</p></div>
+          <div id="source-list" class="stack"></div>
+        </section>
+        <section id="settings" class="page" hidden>
+          <span class="eyebrow">MAKE IT YOURS</span><h2>Briefing preferences</h2>
+          <form id="preferences" class="stack">
+            <div class="panel"><h3>Reading experience</h3><label>Summary language<select id="language"><option value="en">English</option><option value="ru">Russian</option></select></label><label>Summary mode<select id="mode"><option value="ai">AI synthesis</option><option value="extractive">Source excerpts</option></select></label></div>
+            <div class="panel"><h3>Delivery</h3><label class="check"><input id="schedule-enabled" type="checkbox"> Scheduled digests</label><label>Times, separated by commas<input id="times" placeholder="09:00, 20:00" required></label><label>Time zone<input id="timezone" placeholder="America/Los_Angeles" required></label><p class="muted">Changing the times or time zone starts a fresh delivery window. Pausing keeps your place.</p></div>
+            <div class="panel"><h3>Focus</h3><label>Topics, separated by commas<input id="topics" placeholder="Leave empty to include all topics"></label><label>Excluded words or phrases<input id="exclude" placeholder="Optional, separated by commas"></label><p id="retention-label" class="muted"></p></div>
+            <div class="form-actions"><button class="primary" type="submit">Save preferences</button><button id="reload-settings" type="button" class="secondary">Reload saved</button></div>
+          </form>
+        </section>
+      </main>
+      <footer>Collected privately. Read with perspective.</footer>
+    </div>
+  </div>
+  <dialog id="history-dialog"><div class="dialog-heading"><div><span class="eyebrow">OBSERVED VERSIONS</span><h2>Message history</h2></div><button id="close-history" class="icon-button" aria-label="Close history">×</button></div><div id="history-events" class="stack"></div><button id="more-history" class="secondary wide" hidden>Older versions</button><p class="muted">Only changes observed by the collector are available.</p></dialog>
+</body>
+</html>

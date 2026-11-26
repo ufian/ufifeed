@@ -71,7 +71,7 @@ class AI(StrictModel):
     model: str = ""
     codex_path: str = "/usr/local/bin/codex"
     timeout_seconds: int = Field(default=180, ge=30, le=600)
-    daily_call_limit: int = Field(default=20, ge=1, le=1000)
+    daily_call_limit: int = Field(default=100, ge=1, le=1000)
     max_input_chars: int = Field(default=24000, ge=1000, le=100000)
 
     @model_validator(mode="after")
@@ -83,6 +83,31 @@ class AI(StrictModel):
         return self
 
 
+class MiniApp(StrictModel):
+    enabled: bool = False
+    public_url: str = ""
+    port: int = Field(default=8082, ge=1024, le=65535)
+
+    @model_validator(mode="after")
+    def configured(self) -> MiniApp:
+        from urllib.parse import urlsplit
+
+        if self.enabled:
+            url = urlsplit(self.public_url)
+            if (
+                url.scheme != "https"
+                or not url.hostname
+                or url.username
+                or url.password
+                or url.query
+                or url.fragment
+                or url.path not in ("", "/")
+            ):
+                raise ValueError("Mini App requires an HTTPS origin URL")
+            _ = url.port
+        return self
+
+
 class Config(StrictModel):
     owner: Owner
     storage: Storage = Field(default_factory=Storage)
@@ -90,6 +115,7 @@ class Config(StrictModel):
     digest: Digest = Field(default_factory=Digest)
     schedule: Schedule = Field(default_factory=Schedule)
     ai: AI = Field(default_factory=AI)
+    miniapp: MiniApp = Field(default_factory=MiniApp)
 
     @classmethod
     def load(cls, path: str | Path) -> Config:

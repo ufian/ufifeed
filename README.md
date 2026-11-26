@@ -68,6 +68,12 @@ Useful controls:
 - `/retry ID` explains the possible duplicate risk before an uncertain delivery can be retried.
 - `/purge ID` removes retained messages for a disabled source and stored digest payloads. Delivered Telegram messages and external backups are unaffected.
 
+## Mini App
+
+The owner-only Telegram Mini App provides briefings, a searchable-by-source message journal with observed versions, source controls and client preferences. Open the **Ufifeed** menu button in the bot. The public endpoint is `https://ufifeed.ufian.com:8443/`; private APIs require signed Telegram owner authorization. The VM remains the only data store behind a restricted SSH tunnel and the shared HTTPS proxy. See [Mini App deployment](docs/miniapp.md).
+
+Summary titles are bold; details and references are collapsible. Group summaries keep only 1–3 important topics with 1–2 short sentences per topic, without introductory filler.
+
 ## AI backends
 
 Set server-side `[ai]` parameters in `state/config/ufifeed.toml`, then recreate the application. Provider credentials are not accepted through bot commands.

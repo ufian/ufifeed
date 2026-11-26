@@ -36,6 +36,11 @@ base_url = "https://api.openai.com/v1"
 model = ""
 codex_path = "/usr/local/bin/codex"
 timeout_seconds = 180
-daily_call_limit = 20
+daily_call_limit = 100
 max_input_chars = 24000
 # API key: secrets/credentials.json (ai_api_key) or the AI_API_KEY environment variable.
+
+[miniapp]
+enabled = false
+public_url = "https://ufifeed.ufian.com:8443/"
+port = 8082

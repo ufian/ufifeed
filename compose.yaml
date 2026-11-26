@@ -11,6 +11,8 @@ services:
     security_opt: ["no-new-privileges:true"]
     cpus: 1.0
     mem_limit: 1g
+    ports:
+      - "127.0.0.1:8082:8082"
     stop_grace_period: 30s
     environment:
       CODEX_HOME: /app/codex

@@ -7,6 +7,7 @@ import signal
 from pathlib import Path
 
 from aiogram import Bot
+from aiogram.types import MenuButtonWebApp, WebAppInfo
 
 from ufifeed.bot import Controls, delivery_loop, set_commands
 from ufifeed.config import Config, Credentials
@@ -71,6 +72,13 @@ async def run(config: Config, credentials: Credentials) -> None:
         if webhook.url:
             raise ValueError("Bot already has a webhook; use a dedicated bot without a webhook")
         await set_commands(bot)
+        if config.miniapp.enabled:
+            await bot.set_chat_menu_button(
+                chat_id=config.owner.user_id,
+                menu_button=MenuButtonWebApp(
+                    text="Ufifeed", web_app=WebAppInfo(url=config.miniapp.public_url)
+                ),
+            )
         digests = Digests(config, credentials, store, reader)
         controls = Controls(config, store, reader, digests)
         tasks = [
@@ -95,6 +103,14 @@ async def run(config: Config, credentials: Credentials) -> None:
             ),
             asyncio.create_task(stop.wait(), name="shutdown"),
         ]
+        if config.miniapp.enabled:
+            from ufifeed.miniapp import MiniApp
+
+            tasks.append(
+                asyncio.create_task(
+                    MiniApp(config, credentials, store, controls).run(), name="miniapp"
+                )
+            )
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             if task.get_name() != "shutdown":

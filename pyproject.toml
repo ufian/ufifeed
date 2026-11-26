@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Private Telegram folder digests"
 requires-python = ">=3.12,<3.15"
 dependencies = [
+  "aiohttp>=3.9,<4",
   "aiogram>=3.13,<4",
   "telethon>=1.36,<2",
   "cryptography>=43",

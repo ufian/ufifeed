@@ -1,0 +1,17 @@
+[Unit]
+Description=Ufifeed Mini App outbound SSH tunnel
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+User=ufian
+ExecStart=/usr/bin/ssh -NT -i /home/ufian/ufifeed/state/secrets/miniapp_tunnel_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/home/ufian/ufifeed/state/secrets/miniapp_known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -o ConnectTimeout=15 -R 127.0.0.1:18081:127.0.0.1:8082 ufifeed-tunnel@96.44.158.249
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

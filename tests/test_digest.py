@@ -351,3 +351,42 @@ async def test_chunk_analysis_resumes_from_encrypted_cache_after_failure(
     assert all(
         b"Finding" not in row[0] for row in store.conn.execute("SELECT payload FROM analysis_cache")
     )
+
+
+async def test_group_briefings_are_brief_and_details_are_collapsible(
+    store, config, credentials, item, monkeypatch
+):
+    import json
+
+    config.ai.enabled, config.ai.provider = True, "codex"
+    store.set("mode", "ai")
+    store.sync_folder(
+        [{"id": -42, "title": "Discussion", "kind": "group", "peer_type": "chat"}], item["date"]
+    )
+    store.upsert_live(-42, item)
+    with store.conn:
+        store.conn.execute("UPDATE sources SET ai_allowed=1")
+
+    async def complete(ai, instructions, records, schema):
+        assert "No introductory framing" in instructions
+        assert schema["properties"]["items"]["maxItems"] <= 3
+        assert schema["$defs"]["AISummary"]["properties"]["text"]["maxLength"] == 320
+        return json.dumps(
+            {
+                "items": [
+                    {
+                        "title": "Transit changes divided the group",
+                        "text": "Evening frequency mattered most; "
+                        "residents disagreed about the proposed route.",
+                        "refs": [1],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("ufifeed.digest.codex_complete", complete)
+    parts = await Digests(config, credentials, store, None).build(
+        item["date"], utcnow(), preview=True
+    )
+    assert "<b>Transit changes divided the group</b>\n<blockquote expandable>" in parts[0]
+    assert "</blockquote>" in parts[0]
