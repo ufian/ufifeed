@@ -561,7 +561,11 @@ class Digests:
                     )
                 ]
             for section, items in sections:
-                section_header = header + "\n<b>" + section + "</b>"
+                section_header = (
+                    f"<b>{section}</b>\n{window}{suffix}"
+                    if key == "world"
+                    else f"{header}\n<b>{section}</b>"
+                )
                 if mode == "ai" and key != "world":
                     section_header += "\n" + labels["ai_input_coverage"].format(
                         sources=len({r["source_id"] for r in stream}), messages=len(stream)

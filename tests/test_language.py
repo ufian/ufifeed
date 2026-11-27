@@ -31,7 +31,8 @@ async def test_language_selected_in_bot_persists_after_restart(store, config, cr
     store.upsert_live(-1000000000123, item)
     parts = await digests.build(item["date"], utcnow(), preview=True)
     labels = digest_labels("ru")
-    assert parts[0].startswith(f"<b>{labels['extractive_title']}{labels['manual_suffix']}</b>")
+    assert parts[0].startswith(f"<b>{labels['news_other']}</b>\n")
+    assert parts[0].splitlines()[1].endswith(labels["manual_suffix"])
     assert item["text"] in parts[0]  # Extractive excerpts keep the original source language.
 
 

@@ -148,7 +148,7 @@ async def test_manual_digest_keeps_automatic_window(store, config, credentials, 
     reader = SimpleNamespace(sync_all=AsyncMock(return_value=True))
     await Digests(config, credentials, store, reader).manual()
     assert store.last_window_end() == before
-    assert store.claim()["payload"].startswith("<b>Highlights · preview</b>")
+    assert store.claim()["payload"].startswith("<b>Other news</b>\n")
 
 
 async def test_busy_chat_cannot_hide_other_sources_from_ai_input(
@@ -469,6 +469,7 @@ async def test_channel_topics_are_localized_and_weights_use_observed_history(
         now - timedelta(hours=2), now, preview=True
     )
     assert len(parts) == 2
-    assert "<b>США</b>" in parts[0] and "Model release" not in parts[0]
-    assert "<b>AI</b>" in parts[1] and "Model release" in parts[1]
+    assert parts[0].startswith("<b>США</b>\n") and "Model release" not in parts[0]
+    assert parts[1].startswith("<b>AI</b>\n") and "Model release" in parts[1]
+    assert all("AI-сводка" not in part for part in parts)
     assert all("<b>Другие новости</b>" not in part for part in parts)
