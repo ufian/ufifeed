@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from zoneinfo import ZoneInfo
 
-from aiogram import BaseMiddleware, Bot, Dispatcher, Router
+from aiogram import Bot, Dispatcher, Router
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
     TelegramRetryAfter,
 )
-from aiogram.types import BotCommand, LinkPreviewOptions, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    Message,
+    MessageOriginChannel,
+    WebAppInfo,
+)
 
 from ufifeed.config import Config, Schedule
 from ufifeed.digest import DigestError, Digests, units
@@ -26,6 +36,12 @@ HELP = """ufifeed — private digests from a dedicated Telegram account folder.
 /folders — list folders in the reader account
 /folder ID — choose a folder (0 disables collection)
 /sources — sources and collection status
+/subscribe all|none|ID [ID ...] — choose sources for your digest
+/settings — open your digest settings
+/invite ID [ID ...] — create a single-use invitation for selected sources
+/invite all — invite with access to all current sources
+/subscribers — list active subscribers
+/revoke USER_ID — revoke a subscriber
 /topics word, phrase — topics; off includes all topics
 /exclude word, phrase — exclusions; off clears them
 /schedule 09:00,20:00 America/Los_Angeles — digest times
@@ -42,6 +58,7 @@ HELP = """ufifeed — private digests from a dedicated Telegram account folder.
 /retry ID — retry a failed or uncertain delivery
 /purge ID — delete retained source data
 
+Forward a channel post here to add and mute its channel in the reader folder.
 Use explicitly selected channels and groups, without automatic categories or unread filters.
 AI access sends source text to the configured AI service. Enable it for sources with an established
 basis for this processing. New sources inherit /ai_folder (off by default).
@@ -55,16 +72,6 @@ def authorized(message: Message, owner_id: int) -> bool:
         and message.chat.type == "private"
         and message.chat.id == owner_id
     )
-
-
-class OwnerOnly(BaseMiddleware):
-    def __init__(self, owner_id: int):
-        self.owner_id = owner_id
-
-    async def __call__(self, handler, event, data):
-        if isinstance(event, Message) and authorized(event, self.owner_id):
-            return await handler(event, data)
-        return None
 
 
 async def reply(message: Message, text: str) -> None:
@@ -90,7 +97,6 @@ class Controls:
         self.config, self.store, self.reader, self.digests = config, store, reader, digests
         self.dispatcher = Dispatcher()
         router = Router()
-        router.message.outer_middleware(OwnerOnly(config.owner.user_id))
         router.message.register(self.handle)
         self.dispatcher.include_router(router)
 
@@ -104,12 +110,38 @@ class Controls:
         )
 
     async def handle(self, message: Message) -> None:
-        if not message.text:
+        if not message.from_user or message.from_user.is_bot:
             return
-        command, _, argument = message.text.partition(" ")
+        user_id = message.from_user.id
+        if not authorized(message, user_id):
+            return
+        recipient_id = None if user_id == self.config.owner.user_id else user_id
+        command, _, argument = (message.text or "").partition(" ")
         command, argument = command.split("@")[0].lower(), argument.strip()
         try:
-            text = await self.execute(command, argument)
+            if recipient_id is None and isinstance(message.forward_origin, MessageOriginChannel):
+                chat = message.forward_origin.chat
+                text = await self.reader.add_forwarded_channel(chat.id, chat.username)
+            elif not message.text or message.forward_origin is not None:
+                return
+            elif recipient_id is not None:
+                text = await self.subscriber_command(message, user_id, command, argument)
+            elif command == "/invite":
+                if not argument:
+                    text = "Use /invite ID [ID ...] or /invite all. See /sources for IDs."
+                else:
+                    source_ids = self.parse_sources(argument, None)
+                    bot = await message.bot.me()
+                    code = self.store.create_invite(source_ids)
+                    text = (
+                        "Share this invitation with one person. It expires in 24 hours.\n"
+                        f"https://t.me/{bot.username}?start=join_{code}"
+                    )
+            elif command == "/settings":
+                await self.send_settings(message)
+                return
+            else:
+                text = await self.execute(command, argument)
         except (ValueError, ReaderError, DigestError) as exc:
             # Pydantic errors can include submitted text; command arguments aren't secrets.
             text = (
@@ -122,10 +154,86 @@ class Controls:
             text = f"Command failed: {type(exc).__name__}. Try again later."
         await reply(message, text)
 
+    def parse_sources(self, argument: str, recipient_id: int | None) -> set[int]:
+        if argument == "all":
+            return {s["id"] for s in self.store.available_sources(recipient_id)}
+        if argument == "none":
+            return set()
+        return {int(value) for value in argument.replace(",", " ").split()}
+
+    def select_sources(self, recipient_id: int | None, argument: str) -> str:
+        if not argument:
+            return "Use /subscribe all, /subscribe none, or /subscribe ID [ID ...]."
+        selected = None if argument == "all" else self.parse_sources(argument, recipient_id)
+        self.store.select_sources(recipient_id, selected)
+        return "Digest sources saved. See /sources."
+
+    async def send_settings(self, message: Message) -> None:
+        if not self.config.miniapp.enabled:
+            await reply(message, "Use /sources, /subscribe and /language to manage your digest.")
+            return
+        url = self.config.miniapp.public_url.rstrip("/") + "/preferences"
+        await message.answer(
+            "Choose the sources for your digest.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="Digest settings", web_app=WebAppInfo(url=url))]
+                ]
+            ),
+        )
+
+    async def subscriber_command(
+        self, message: Message, user_id: int, command: str, argument: str
+    ) -> str:
+        code = argument.removeprefix("join_") if command == "/start" else argument
+        if command == "/join" or (command == "/start" and argument.startswith("join_")):
+            if not re.fullmatch(r"[A-Za-z0-9_-]{32}", code) or not self.store.join(user_id, code):
+                return "This invitation is invalid, expired, or already used."
+            await self.send_settings(message)
+            return "You are subscribed. Digests will arrive here on the shared schedule."
+        preferences = self.store.subscriber(user_id)
+        if not preferences:
+            return "You need an invitation to subscribe." if command == "/start" else ""
+        if command == "/settings":
+            await self.send_settings(message)
+            return ""
+        if command == "/subscribe":
+            return self.select_sources(user_id, argument)
+        if command == "/sources":
+            active = self.store.selected_sources(user_id)
+            return (
+                "\n".join(
+                    f"{s['id']} — {s['title']} [{'on' if s['id'] in active else 'off'}]"
+                    for s in self.store.available_sources(user_id)
+                )
+                or "There are no available sources."
+            )
+        if command == "/language":
+            if argument:
+                self.store.subscriber_language(user_id, language_code(argument))
+            return f"Digest language: {argument or preferences['language']}. Use /language en|ru."
+        if command == "/schedule":
+            return self.schedule_text()
+        if command == "/unsubscribe":
+            self.store.revoke(user_id)
+            return "Subscription ended."
+        return (
+            "/settings — choose digest sources\n/sources — available sources\n"
+            "/subscribe all|none|ID [ID ...] — choose sources\n"
+            "/language en|ru — digest language\n/schedule — delivery times\n"
+            "/unsubscribe — stop receiving digests"
+        )
+
     async def execute(self, command: str, argument: str) -> str:
         if command in {"/start", "/help"}:
             self.store.set("started", True)
             return HELP
+        if command == "/subscribe":
+            return self.select_sources(None, argument)
+        if command == "/subscribers":
+            return "\n".join(str(s["id"]) for s in self.store.subscribers()) or "No subscribers."
+        if command == "/revoke":
+            return "Subscriber revoked." if self.store.revoke(int(argument)) else "No subscriber."
         if command == "/folders":
             folders = await self.reader.folders()
             return (
@@ -152,9 +260,12 @@ class Controls:
             )
         if command == "/sources":
             sources = self.store.sources()
+            selected = self.store.selected_sources(None)
             return (
                 "\n".join(
-                    f"{s['id']} — {s['title']} | AI: {'on' if s['ai_allowed'] else 'off'} | "
+                    f"{s['id']} — {s['title']} | "
+                    f"Digest: {'on' if s['id'] in selected else 'off'} | "
+                    f"AI: {'on' if s['ai_allowed'] else 'off'} | "
                     f"{s['error'] or ('synced' if s['initialized'] else 'pending')}"
                     for s in sources
                 )
@@ -326,7 +437,7 @@ async def deliver_one(bot: Bot, store: Store, owner_id: int) -> bool:
         return False
     try:
         message = await bot.send_message(
-            owner_id,
+            item["recipient_id"] or owner_id,
             item["payload"],
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -348,11 +459,14 @@ async def delivery_loop(bot: Bot, store: Store, owner_id: int) -> None:
         await asyncio.sleep(1.1)
 
 
-async def set_commands(bot: Bot) -> None:
+async def set_commands(bot: Bot, owner_id: int) -> None:
     await bot.set_my_commands(
         [
             BotCommand(command=command, description=description)
             for command, description in [
+                ("settings", "Digest settings"),
+                ("invite", "Create an invitation"),
+                ("subscribers", "Active subscribers"),
                 ("digest", "Digest now"),
                 ("status", "Status"),
                 ("folders", "Choose a folder"),
@@ -366,5 +480,15 @@ async def set_commands(bot: Bot) -> None:
                 ("resume", "Resume digests"),
                 ("help", "All commands"),
             ]
+        ],
+        scope=BotCommandScopeChat(chat_id=owner_id),
+    )
+    await bot.set_my_commands(
+        [
+            BotCommand(command="settings", description="Digest settings"),
+            BotCommand(command="sources", description="Available sources"),
+            BotCommand(command="language", description="Digest language"),
+            BotCommand(command="schedule", description="Delivery times"),
+            BotCommand(command="help", description="All commands"),
         ]
     )

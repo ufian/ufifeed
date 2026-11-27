@@ -20,10 +20,11 @@ from ufifeed.store import Store
 from ufifeed.timeutil import stamp, utcnow
 
 log = logging.getLogger(__name__)
+RECIPIENT = web.RequestKey("recipient_id", int | None)
 
 
-def authenticate(raw: str, token: str, owner_id: int, *, now: float | None = None) -> None:
-    """Validate raw Telegram initData, freshness and the paired numeric owner identity."""
+def authenticate(raw: str, token: str, owner_id: int | None, *, now: float | None = None) -> int:
+    """Validate raw Telegram initData, freshness and the numeric identity."""
     try:
         if not raw or len(raw) > 16000:
             raise ValueError
@@ -41,8 +42,11 @@ def authenticate(raw: str, token: str, owner_id: int, *, now: float | None = Non
             raise ValueError
         age = (time.time() if now is None else now) - int(data["auth_date"])
         user = json.loads(data["user"])
-        if not -30 <= age <= 3600 or type(user["id"]) is not int or user["id"] != owner_id:
+        if not -30 <= age <= 3600 or type(user["id"]) is not int or user["id"] <= 0:
             raise ValueError
+        if owner_id is not None and user["id"] != owner_id:
+            raise ValueError
+        return user["id"]
     except (ValueError, KeyError, TypeError, OverflowError):
         raise web.HTTPUnauthorized(
             text="Reopen the Mini App from the paired Telegram account."
@@ -63,6 +67,11 @@ class Settings(StrictModel):
         if any(not word.strip() or len(word) > 100 for word in words):
             raise ValueError("Keywords must contain 1–100 characters")
         return list(dict.fromkeys(word.strip() for word in words))
+
+
+class SourcePreferences(StrictModel):
+    source_ids: list[int] | None
+    revision: str = Field(max_length=64)
 
 
 class Action(StrictModel):
@@ -97,6 +106,9 @@ class MiniApp:
         self.app.add_routes(
             [
                 web.get("/", self.index),
+                web.get("/preferences", self.preferences_page),
+                web.post("/api/preferences/state", self.preferences_state),
+                web.post("/api/preferences/save", self.preferences_save),
                 web.get("/assets/{name}", self.asset),
                 web.get("/health", self.health),
                 web.post("/api/state", self.state),
@@ -117,11 +129,16 @@ class MiniApp:
                 authorization = request.headers.get("Authorization", "")
                 if not authorization.startswith("tma "):
                     raise web.HTTPUnauthorized(text="Open this app from Telegram.")
-                authenticate(
+                preferences = request.path in {"/api/preferences/state", "/api/preferences/save"}
+                user_id = authenticate(
                     authorization[4:],
                     self.credentials.bot_token.get_secret_value(),
-                    self.config.owner.user_id,
+                    None if preferences else self.config.owner.user_id,
                 )
+                recipient = None if user_id == self.config.owner.user_id else user_id
+                if recipient is not None and not self.store.subscriber(recipient):
+                    raise web.HTTPUnauthorized(text="You need an invitation to subscribe.")
+                request[RECIPIENT] = recipient
                 origin = request.headers.get("Origin")
                 target = urlsplit(self.config.miniapp.public_url)
                 expected = f"{target.scheme}://{target.netloc}"
@@ -157,9 +174,44 @@ class MiniApp:
             text=files("ufifeed").joinpath("web/index.html").read_text(), content_type="text/html"
         )
 
+    async def preferences_page(self, request):
+        return web.Response(
+            text=files("ufifeed").joinpath("web/preferences.html").read_text(),
+            content_type="text/html",
+        )
+
+    def preference_data(self, recipient_id: int | None) -> dict:
+        selected = self.store.selected_sources(recipient_id)
+        sources = [
+            {"id": str(s["id"]), "title": s["title"], "selected": s["id"] in selected}
+            for s in self.store.available_sources(recipient_id)
+        ]
+        follow_all = recipient_id is None and self.store.get("owner_selected_sources") is None
+        data = {"sources": sources, "owner": recipient_id is None, "follow_all": follow_all}
+        subscriber = self.store.subscriber(recipient_id) if recipient_id is not None else None
+        revision = hashlib.sha256(
+            json.dumps([data, subscriber and subscriber["joined_at"]]).encode()
+        ).hexdigest()
+        return {**data, "revision": revision}
+
+    async def preferences_state(self, request):
+        return web.json_response(self.preference_data(request[RECIPIENT]))
+
+    async def preferences_save(self, request):
+        data = SourcePreferences.model_validate(await request.json())
+        recipient_id = request[RECIPIENT]
+        if data.revision != self.preference_data(recipient_id)["revision"]:
+            raise web.HTTPConflict(text="Source settings changed. Reopen settings and try again.")
+        if recipient_id is not None and data.source_ids is None:
+            raise ValueError("Select granted sources explicitly")
+        self.store.select_sources(
+            recipient_id, set(data.source_ids) if data.source_ids is not None else None
+        )
+        return web.json_response(self.preference_data(recipient_id))
+
     async def asset(self, request):
         name = request.match_info["name"]
-        if name not in {"app.js", "app.css"}:
+        if name not in {"app.js", "app.css", "preferences.js"}:
             raise web.HTTPNotFound()
         return web.Response(
             text=files("ufifeed").joinpath(f"web/{name}").read_text(),
@@ -185,7 +237,9 @@ class MiniApp:
             )
         }
         runs = []
-        for row in self.store.conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 10"):
+        for row in self.store.conn.execute(
+            "SELECT * FROM runs WHERE recipient_id IS NULL ORDER BY id DESC LIMIT 10"
+        ):
             parts = [
                 {
                     "status": p["status"],

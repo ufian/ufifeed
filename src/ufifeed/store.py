@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -48,6 +49,13 @@ CREATE TABLE IF NOT EXISTS message_events (
     payload BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS event_message ON message_events(source_id,message_id,id);
+CREATE TABLE IF NOT EXISTS subscribers (
+    id INTEGER PRIMARY KEY, granted TEXT NOT NULL, selected TEXT NOT NULL,
+    language TEXT NOT NULL, joined_at TEXT NOT NULL, window_end TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invites (
+    code_hash TEXT PRIMARY KEY, granted TEXT NOT NULL, expires_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS analysis_cache (
     key TEXT PRIMARY KEY, payload BLOB NOT NULL, created_at TEXT NOT NULL
 );
@@ -76,7 +84,7 @@ class Store:
         self.conn.executescript(SCHEMA)
         os.chmod(path, 0o600)
         version = self.get("schema_version", 0)
-        if version not in (0, 1, 2):
+        if version not in (0, 1, 2, 3):
             raise ValueError("Unsupported database schema")
         # Fail early on a wrong encryption key, before collecting or sending anything.
         check = self.get("key_check")
@@ -111,6 +119,12 @@ class Store:
                         },
                     )
                 self._set("schema_version", 2)
+
+        if version < 3:
+            with self.conn:
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.conn.execute("ALTER TABLE runs ADD COLUMN recipient_id INTEGER")
+                self._set("schema_version", 3)
 
     @classmethod
     def open(cls, config: Config) -> Store:
@@ -166,6 +180,109 @@ class Store:
         return [
             dict(row) for row in self.conn.execute(f"SELECT * FROM sources {where} ORDER BY id")
         ]
+
+    def subscriber(self, user_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM subscribers WHERE id=?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def subscribers(self) -> list[dict]:
+        return [dict(row) for row in self.conn.execute("SELECT * FROM subscribers ORDER BY id")]
+
+    def available_sources(self, recipient_id: int | None) -> list[dict]:
+        subscriber = self.subscriber(recipient_id) if recipient_id is not None else None
+        if recipient_id is None:
+            return self.sources()
+        granted = set(json.loads(subscriber["granted"])) if subscriber else set()
+        return [source for source in self.sources() if source["id"] in granted]
+
+    def selected_sources(self, recipient_id: int | None) -> set[int]:
+        available = {source["id"] for source in self.available_sources(recipient_id)}
+        if recipient_id is None:
+            selected = self.get("owner_selected_sources")
+        else:
+            subscriber = self.subscriber(recipient_id)
+            selected = json.loads(subscriber["selected"]) if subscriber else []
+        return available if selected is None else available.intersection(selected)
+
+    def select_sources(self, recipient_id: int | None, source_ids: set[int] | None) -> None:
+        available = {source["id"] for source in self.available_sources(recipient_id)}
+        if source_ids is None and recipient_id is not None:
+            source_ids = available
+        if source_ids is not None and not source_ids <= available:
+            raise ValueError("Source is unavailable")
+        if recipient_id is not None and not self.subscriber(recipient_id):
+            raise ValueError("Subscriber is unavailable")
+        selected = sorted(source_ids) if source_ids is not None else None
+        with self.conn:
+            if recipient_id is None:
+                if self.get("owner_selected_sources") == selected:
+                    return
+                self._set("owner_selected_sources", selected)
+            else:
+                self.conn.execute(
+                    "UPDATE subscribers SET selected=? WHERE id=?",
+                    (json.dumps(selected), recipient_id),
+                )
+            self._expire_recipient(recipient_id)
+
+    def _expire_recipient(self, recipient_id: int | None) -> None:
+        self.conn.execute(
+            "UPDATE outbox SET payload=?,status='expired',error=NULL "
+            "WHERE status IN ('pending','failed','unknown','sending') AND run_id IN "
+            "(SELECT id FROM runs WHERE recipient_id IS ?)",
+            (b"", recipient_id),
+        )
+
+    def create_invite(self, source_ids: set[int]) -> str:
+        if not source_ids or not source_ids <= {s["id"] for s in self.sources()}:
+            raise ValueError("Choose active sources for the invite")
+        code = secrets.token_urlsafe(24)
+        with self.conn:
+            self.conn.execute("DELETE FROM invites WHERE expires_at<=?", (stamp(utcnow()),))
+            self.conn.execute(
+                "INSERT INTO invites VALUES (?,?,?)",
+                (
+                    hashlib.sha256(code.encode()).hexdigest(),
+                    json.dumps(sorted(source_ids)),
+                    stamp(utcnow() + timedelta(hours=24)),
+                ),
+            )
+        return code
+
+    def join(self, user_id: int, code: str) -> bool:
+        with self.conn:
+            invite = self.conn.execute(
+                "DELETE FROM invites WHERE code_hash=? AND expires_at>? RETURNING granted",
+                (hashlib.sha256(code.encode()).hexdigest(), stamp(utcnow())),
+            ).fetchone()
+            if not invite:
+                return False
+            now = stamp(utcnow())
+            self._expire_recipient(user_id)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO subscribers VALUES (?,?,?,?,?,?)",
+                (
+                    user_id,
+                    invite["granted"],
+                    invite["granted"],
+                    self.get("language", "en"),
+                    now,
+                    now,
+                ),
+            )
+            return True
+
+    def revoke(self, user_id: int) -> bool:
+        with self.conn:
+            self._expire_recipient(user_id)
+            return bool(
+                self.conn.execute("DELETE FROM subscribers WHERE id=?", (user_id,)).rowcount
+            )
+
+    def subscriber_language(self, user_id: int, language: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE subscribers SET language=? WHERE id=?", (language, user_id))
+            self._expire_recipient(user_id)
 
     def sync_folder(self, sources: list[dict], since: datetime) -> None:
         """Apply membership only after every peer has been resolved successfully."""
@@ -229,6 +346,7 @@ class Store:
                         "exclude",
                         "mode",
                         "language",
+                        "owner_selected_sources",
                         "content_epoch",
                     )
                 },
@@ -539,11 +657,13 @@ class Store:
         parts: list[str],
         *,
         advance: bool,
+        recipient_id: int | None = None,
     ) -> int | None:
         with self.conn:
             cursor = self.conn.execute(
-                "INSERT OR IGNORE INTO runs(slot,start,end,created_at,mode) VALUES (?,?,?,?,?)",
-                (slot, stamp(start), stamp(end), stamp(utcnow()), mode),
+                "INSERT OR IGNORE INTO runs(slot,start,end,created_at,mode,recipient_id) "
+                "VALUES (?,?,?,?,?,?)",
+                (slot, stamp(start), stamp(end), stamp(utcnow()), mode, recipient_id),
             )
             if not cursor.rowcount:
                 return None
@@ -552,8 +672,12 @@ class Store:
                 "INSERT INTO outbox(run_id,part,payload,next_attempt) VALUES (?,?,?,?)",
                 [(run_id, i, self.encrypt(part), stamp(utcnow())) for i, part in enumerate(parts)],
             )
-            if advance:
+            if advance and recipient_id is None:
                 self._set("window_end", stamp(end))
+            elif advance:
+                self.conn.execute(
+                    "UPDATE subscribers SET window_end=? WHERE id=?", (stamp(end), recipient_id)
+                )
             return run_id
 
     def recover_sending(self) -> None:
@@ -566,7 +690,10 @@ class Store:
     def claim(self) -> dict | None:
         with self.conn:
             row = self.conn.execute(
-                """SELECT o.* FROM outbox o WHERE status='pending' AND next_attempt<=?
+                """SELECT o.*,r.recipient_id FROM outbox o JOIN runs r ON r.id=o.run_id
+                WHERE o.status='pending' AND o.next_attempt<=?
+                AND (r.recipient_id IS NULL OR EXISTS
+                    (SELECT 1 FROM subscribers s WHERE s.id=r.recipient_id))
                 AND NOT EXISTS (SELECT 1 FROM outbox prev WHERE prev.run_id=o.run_id
                     AND prev.part<o.part AND prev.status!='sent') ORDER BY o.id LIMIT 1""",
                 (stamp(utcnow()),),
@@ -581,7 +708,8 @@ class Store:
     def delivered(self, item_id: int, message_id: int) -> None:
         with self.conn:
             self.conn.execute(
-                "UPDATE outbox SET status='sent',message_id=?,error=NULL WHERE id=?",
+                "UPDATE outbox SET status='sent',message_id=?,error=NULL "
+                "WHERE id=? AND status='sending'",
                 (message_id, item_id),
             )
 
@@ -589,7 +717,7 @@ class Store:
         assert status in {"pending", "failed", "unknown"}
         with self.conn:
             self.conn.execute(
-                "UPDATE outbox SET status=?,error=?,next_attempt=? WHERE id=?",
+                "UPDATE outbox SET status=?,error=?,next_attempt=? WHERE id=? AND status='sending'",
                 (status, error, stamp(utcnow() + timedelta(seconds=delay)), item_id),
             )
 

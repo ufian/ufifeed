@@ -65,3 +65,11 @@ The initial schedule remains disabled until the owner selects delivery times. Fu
 Run the project checks and HTTP tests. Browser QA uses a temporary local server with synthetic messages and synthetic Telegram signatures; never add an authentication bypass to the production app. Check public `/health`, an unsigned `/api/state` (401) and a signed owner request without logging its header or private response. Check `ufifeed-tunnel`, Docker health, certificate expiry/renewal and the existing pplan health endpoint after proxy changes.
 
 Back up the VM's encrypted database with its matching key. Replacing the public proxy cannot erase the journal; restore its certificate/configuration/tunnel public key and DNS, then reconnect the VM tunnel. If the VM or tunnel is down, the UI reports a connection error rather than displaying a stale private cache.
+
+## Shared digests
+
+In the owner's private bot chat, run `/sources` to see source IDs. Use `/invite ID [ID ...]` to grant access to particular sources, or `/invite all` to grant access to the sources currently in the reader folder. Forward the resulting link to one person. It expires after 24 hours and is consumed when the recipient opens it and taps **Start**.
+
+Each subscriber receives a digest in their own bot chat on the shared delivery schedule. **Digest settings** and `/subscribe` select from that subscriber's granted active sources. `/language en|ru` changes their digest language. The owner can also choose their own sources using the settings link. Subscriber digests use the owner’s collection and summarization policies and only include posts from their subscription period. New reader sources require a fresh invitation to become available to an existing subscriber.
+
+Use `/subscribers` to list user IDs and `/revoke USER_ID` to revoke access and drop queued deliveries for that user. Subscribers can leave using `/unsubscribe`. Forward a channel post to the owner’s bot chat to add its channel to the selected reader folder and mute notifications. Public channels can be joined directly. Private channels require the reader account to have access first.

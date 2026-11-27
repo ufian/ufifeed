@@ -71,7 +71,7 @@ async def run(config: Config, credentials: Credentials) -> None:
         webhook = await bot.get_webhook_info()
         if webhook.url:
             raise ValueError("Bot already has a webhook; use a dedicated bot without a webhook")
-        await set_commands(bot)
+        await set_commands(bot, config.owner.user_id)
         if config.miniapp.enabled:
             await bot.set_chat_menu_button(
                 chat_id=config.owner.user_id,

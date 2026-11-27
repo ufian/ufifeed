@@ -169,3 +169,35 @@ async def test_preview_is_background_work_and_duplicate_is_rejected(miniapp):
         gate.set()
         await miniapp.digest_task
         assert miniapp.store.get("manual_job") == {"state": "queued", "run_id": 42}
+
+
+async def test_guest_settings_only_expose_granted_sources_and_require_active_subscription(
+    miniapp, store
+):
+    allowed, hidden = -1000000000123, -1000000000456
+    store.sync_folder(
+        [{"id": allowed, "title": "Allowed"}, {"id": hidden, "title": "Hidden"}], utcnow()
+    )
+    assert store.join(456, store.create_invite({allowed}))
+    guest = headers(user=456)
+    async with TestClient(TestServer(miniapp.app)) as client:
+        path = "/api/preferences/state"
+        response = await client.post(path, headers=guest, json={})
+        data = await response.json()
+        assert [s["title"] for s in data["sources"]] == ["Allowed"]
+        path_save = "/api/preferences/save"
+        revision = data["revision"]
+        response = await client.post(
+            path_save, headers=guest, json={"revision": revision, "source_ids": [hidden]}
+        )
+        assert response.status == 400
+        response = await client.post(
+            path_save, headers=guest, json={"revision": revision, "source_ids": []}
+        )
+        assert response.status == 200
+        assert not store.selected_sources(456)
+        assert store.selected_sources(None) == {allowed, hidden}
+        for route in ("/api/state", "/api/journal", "/api/digest", "/api/settings"):
+            assert (await client.post(route, headers=guest, json={})).status == 401
+        assert store.revoke(456)
+        assert (await client.post(path, headers=guest, json={})).status == 401

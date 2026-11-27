@@ -6,14 +6,14 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.methods import SendMessage
 from aiogram.types import Chat, Message, User
 
-from ufifeed.bot import Controls, OwnerOnly, deliver_one
+from ufifeed.bot import Controls, deliver_one
 from ufifeed.digest import Digests
 from ufifeed.timeutil import utcnow
 
 
-async def test_controls_ignore_other_users_and_groups():
-    middleware = OwnerOnly(123)
-    handler = AsyncMock()
+async def test_controls_ignore_other_users_and_groups(store, config):
+    controls = Controls(config, store, None, None)
+    controls.execute = AsyncMock(return_value="")
     for user_id, chat_type, chat_id in [(456, "private", 456), (123, "group", -12)]:
         message = Message(
             message_id=1,
@@ -22,8 +22,8 @@ async def test_controls_ignore_other_users_and_groups():
             from_user=User(id=user_id, is_bot=False, first_name="User"),
             chat=Chat(id=chat_id, type=chat_type),
         )
-        await middleware(handler, message, {})
-    handler.assert_not_called()
+        await controls.handle(message)
+    controls.execute.assert_not_called()
     owner = Message(
         message_id=2,
         date=datetime.now(UTC),
@@ -31,8 +31,8 @@ async def test_controls_ignore_other_users_and_groups():
         from_user=User(id=123, is_bot=False, first_name="Owner"),
         chat=Chat(id=123, type="private"),
     )
-    await middleware(handler, owner, {})
-    handler.assert_awaited_once()
+    await controls.handle(owner)
+    controls.execute.assert_awaited_once()
 
 
 async def test_network_failure_is_unknown_and_never_automatically_resent(store, item):
@@ -87,3 +87,30 @@ async def test_journal_history_and_folder_ai_controls(store, config, credentials
     assert not store.sources()[0]["ai_allowed"]
     store.change_folder(5)
     assert not store.get("ai_folder")
+
+
+async def test_only_owner_can_add_forwarded_media_channel(store, config, monkeypatch):
+    import ufifeed.bot as controls_module
+
+    reader = SimpleNamespace(add_forwarded_channel=AsyncMock(return_value="Channel added"))
+    controls = Controls(config, store, reader, None)
+    monkeypatch.setattr(controls_module, "reply", AsyncMock())
+    for user_id, chat_type, chat_id in [
+        (456, "private", 456),
+        (123, "group", -12),
+        (123, "private", 123),
+    ]:
+        message = Message(
+            message_id=1,
+            date=datetime.now(UTC),
+            from_user=User(id=user_id, is_bot=False, first_name="User"),
+            chat=Chat(id=chat_id, type=chat_type),
+            forward_origin={
+                "type": "channel",
+                "date": datetime.now(UTC),
+                "message_id": 42,
+                "chat": {"id": -1000000000123, "type": "channel", "username": "example"},
+            },
+        )
+        await controls.handle(message)
+    reader.add_forwarded_channel.assert_awaited_once_with(-1000000000123, "example")

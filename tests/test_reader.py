@@ -129,3 +129,43 @@ async def test_concurrent_collection_requests_share_the_completed_pass(store, co
     gate.set()
     assert await asyncio.gather(first, second) == [True, True]
     reader.reconcile.assert_awaited_once()
+
+
+async def test_forwarded_public_channel_is_joined_muted_and_added(store, config, credentials):
+    from telethon import functions
+    from telethon.tl import types
+
+    from ufifeed.reader import Reader
+    from ufifeed.timeutil import utcnow
+
+    store.set("folder_id", 214)
+    reader = Reader(config, credentials, store)
+    existing = types.InputPeerChannel(999, 1)
+    folder = types.DialogFilter(214, types.TextWithEntities("Ufifeed", []), [], [existing], [])
+    reader.folders = AsyncMock(return_value=[{"id": 214, "filter": folder}])
+    entity = types.Channel(
+        123,
+        "Forwarded",
+        types.ChatPhotoEmpty(),
+        utcnow(),
+        left=True,
+        broadcast=True,
+        username="forwarded",
+        access_hash=42,
+    )
+    reader.client = AsyncMock(return_value=True)
+    reader.client.get_entity.return_value = entity
+    response = await reader.add_forwarded_channel(-1000000000123, "forwarded")
+    assert "Notifications are muted" in response
+    requests = [call.args[0] for call in reader.client.await_args_list]
+    assert [type(r) for r in requests] == [
+        functions.channels.JoinChannelRequest,
+        functions.account.UpdateNotifySettingsRequest,
+        functions.messages.UpdateDialogFilterRequest,
+    ]
+    assert requests[1].settings.mute_until.year == 2038
+    assert requests[2].filter.include_peers == [existing, types.InputPeerChannel(123, 42)]
+    assert reader.wake.is_set()
+    entity.left = False
+    await reader.add_forwarded_channel(-1000000000123, "forwarded")
+    assert reader.client.await_count == 3

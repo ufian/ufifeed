@@ -85,7 +85,7 @@ def test_v1_migration_preserves_existing_encrypted_text_and_baseline(config, ite
             (SOURCE, item["id"], stamp(item["date"]), cipher.encrypt(item["text"].encode()), "old"),
         )
     db = Store.open(config)
-    assert db.get("schema_version") == 2
+    assert db.get("schema_version") == 3
     assert db.candidates(item["date"], utcnow())[0]["text"] == item["text"]
     assert db.message_history(SOURCE, item["id"])[0]["kind"] == "baseline"
     db.close()

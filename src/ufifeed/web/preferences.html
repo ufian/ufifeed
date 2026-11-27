@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Ufifeed digest settings</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script defer src="/assets/preferences.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <h1>Digest sources</h1>
+    <p class="intro">Choose which sources to include in your Telegram digest.</p>
+    <p id="status" role="status">Open digest settings from the Telegram bot.</p>
+    <form id="preferences" class="stack" hidden>
+      <section class="panel">
+        <label id="follow-label" class="check" hidden>
+          <input id="follow-all" type="checkbox"> Include all current and future sources
+        </label>
+        <div id="sources"></div>
+      </section>
+      <button id="save" type="submit" class="primary">Save sources</button>
+    </form>
+  </main>
+</body>
+</html>

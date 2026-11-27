@@ -68,7 +68,7 @@ Parts are sent sequentially. Confirmed `sent` parts are never automatically repe
 
 ## Storage and access
 
-SQLite WAL with short transactions on the event-loop thread. A filesystem session lock prevents concurrent reader/auth/configure processes. Operational `status` uses a read-only database connection. Metadata schema version is 2. Migration checks the encryption key first, then transactionally adds source classification, message details/deletion timestamps and baseline history. Back up before migration.
+SQLite WAL with short transactions on the event-loop thread. A filesystem session lock prevents concurrent reader/auth/configure processes. Operational `status` uses a read-only database connection. Metadata schema version is 3. Migration checks the encryption key first, then transactionally adds source classification, message details/deletion timestamps and baseline history. Back up before migration.
 
 Fernet encrypts message text, sender/media/reaction details, version snapshots, analysis cache and outbox payloads. Its key is separate in `secrets/data.key`. Technical metadata and settings remain plaintext. Telegram sessions, bot credentials, and Codex auth cache are private files, never image layers or Git content. The Codex executable is pinned and verified against the official archive SHA-256.
 

@@ -398,10 +398,20 @@ class Digests:
         self.config, self.credentials, self.store, self.reader = config, credentials, store, reader
         self.lock = asyncio.Lock()
 
-    async def build(self, start: datetime, end: datetime, *, preview: bool) -> list[str]:
-        rows = self.store.candidates(start, end)
+    async def build(
+        self, start: datetime, end: datetime, *, preview: bool, recipient_id: int | None = None
+    ) -> list[str]:
+        source_ids = self.store.selected_sources(recipient_id)
+        if recipient_id is not None and not source_ids:
+            return []
+        rows = [row for row in self.store.candidates(start, end) if row["source_id"] in source_ids]
+        subscriber = self.store.subscriber(recipient_id) if recipient_id is not None else None
+        if subscriber:
+            rows = [row for row in rows if parse(row["date"]) >= parse(subscriber["joined_at"])]
         mode = self.store.get("mode", "extractive")
-        language = language_code(self.store.get("language", "en"))
+        language = language_code(
+            subscriber["language"] if subscriber else self.store.get("language", "en")
+        )
         labels = digest_labels(language)
         topics, exclude = self.store.get("topics", []), self.store.get("exclude", [])
         if mode == "ai":
@@ -434,7 +444,9 @@ class Digests:
                     self.config,
                     self.credentials,
                     self.store,
-                    self.store.with_reply_context(stream) if key != "world" else stream,
+                    self.store.with_reply_context(stream)
+                    if key != "world" and recipient_id is None
+                    else stream,
                     language=language,
                     profile="world" if key == "world" else "group",
                 )
@@ -475,7 +487,7 @@ class Digests:
             parts.extend(
                 render_parts(section_header, entries, continuation=labels["continued_suffix"])
             )
-        if mode == "ai":
+        if mode == "ai" and recipient_id is None:
             self.store.set(
                 "last_ai_input",
                 {
@@ -526,26 +538,54 @@ class Digests:
             if not schedule.enabled or not self.store.get("started"):
                 return
             due = latest_slot(utcnow(), schedule.times, schedule.timezone)
-            start = self.store.last_window_end()
-            if due <= start:
+            owner_start = self.store.last_window_end()
+            subscribers = [s for s in self.store.subscribers() if parse(s["window_end"]) < due]
+            if due <= owner_start and not subscribers:
                 return
             if not await self.reader.sync_all():
-                # Never advance a window past unavailable sources. Coalesce on recovery.
                 self.store.set("digest_error", "Waiting for source synchronization")
                 return
-            # Re-check settings after network calls to respect pause/folder changes.
-            if (
-                self.store.get("schedule") != schedule.model_dump()
-                or self.store.last_window_end() != start
-            ):
+            if self.store.get("schedule") != schedule.model_dump():
                 return
-            if self.config.storage.retention_days:
-                start = max(start, due - timedelta(days=self.config.storage.retention_days))
             signature = self.store.input_signature()
-            parts = await self.build(start, due, preview=False)
-            if signature != self.store.input_signature():
-                return
-            self.store.enqueue(
-                "daily:" + stamp(due), start, due, self.store.get("mode"), parts, advance=True
-            )
+            owner_error = None
+            if owner_start < due and owner_start == self.store.last_window_end():
+                try:
+                    await self._schedule_run(owner_start, due, signature)
+                except DigestError as exc:
+                    owner_error = exc
+            guest_error = None
+            for subscriber in subscribers:
+                if signature != self.store.input_signature():
+                    break
+                if self.store.subscriber(subscriber["id"]) != subscriber:
+                    continue
+                try:
+                    await self._schedule_run(
+                        parse(subscriber["window_end"]), due, signature, subscriber=subscriber
+                    )
+                except DigestError as exc:
+                    guest_error = exc
+            if owner_error or guest_error:
+                raise owner_error or guest_error
             self.store.set("digest_error", None)
+
+    async def _schedule_run(
+        self, start: datetime, due: datetime, signature: str, *, subscriber: dict | None = None
+    ) -> None:
+        if self.config.storage.retention_days:
+            start = max(start, due - timedelta(days=self.config.storage.retention_days))
+        recipient_id = subscriber["id"] if subscriber else None
+        if recipient_id is None:
+            parts = await self.build(start, due, preview=False)
+            slot = "daily:" + stamp(due)
+        else:
+            parts = await self.build(start, due, preview=False, recipient_id=recipient_id)
+            if self.store.subscriber(recipient_id) != subscriber:
+                return
+            slot = f"subscriber:{recipient_id}:" + stamp(due)
+        if signature != self.store.input_signature():
+            return
+        self.store.enqueue(
+            slot, start, due, self.store.get("mode"), parts, advance=True, recipient_id=recipient_id
+        )
