@@ -305,7 +305,7 @@ async def test_world_and_each_group_have_isolated_summaries_with_reactions_and_c
     assert any(r["text"] == "Original question" and r["context_only"] for r in records)
     assert {r["source"] for r in records} == {"Chat A"}
     assert {r["source"] for r in chats["Chat B"][1]} == {"Chat B"}
-    assert len(parts) == 3 and "World events" in parts[0]
+    assert len(parts) == 3 and "Other news" in parts[0]
     assert store.get("last_ai_input")["messages"] == 4
 
 
@@ -409,3 +409,66 @@ async def test_manual_preview_waits_for_telegram_cooldown_before_retry(
     assert run and reader.sync_all.await_count == 2
     assert 0 < pause.await_args.args[0] <= 21
     assert store.last_window_end() == before
+
+
+async def test_channel_topics_are_localized_and_weights_use_observed_history(
+    store, config, credentials, item, monkeypatch
+):
+    import json
+    from datetime import timedelta
+
+    now = utcnow()
+    since = now - timedelta(days=2)
+    slow, busy = -1000000000123, -1000000000456
+    store.sync_folder([{"id": slow, "title": "Blog"}, {"id": busy, "title": "Wire"}], since)
+    store.conn.execute("UPDATE sources SET since=?,ai_allowed=1", (since.isoformat(),))
+    store.conn.commit()
+    for i in range(50):
+        store.upsert_live(busy, {**item, "id": i + 100, "date": now - timedelta(days=1)})
+    for source, body in [(slow, "A useful model release"), (busy, "US election update")]:
+        store.upsert_live(source, {**item, "date": now - timedelta(minutes=1), "text": body})
+    config.ai.enabled = True
+    config.ai.provider = "codex"
+    store.set("mode", "ai")
+    store.set("language", "ru")
+
+    async def complete(ai, instructions, records, schema):
+        assert schema["$defs"]["AISummary"]["properties"]["topic"]["enum"] == [
+            "russia",
+            "russia_ukraine_war",
+            "us",
+            "economy",
+            "ai",
+            "other",
+        ]
+        rows = {record["source"]: record for record in records}
+        assert rows["Blog"]["posts_per_day"] == 0.5
+        assert rows["Blog"]["editorial_weight"] > rows["Wire"]["editorial_weight"]
+        assert rows["Wire"]["posts_per_day"] == 25.5
+        return json.dumps(
+            {
+                "items": [
+                    {
+                        "title": "Model release",
+                        "text": "Model",
+                        "topic": "ai",
+                        "refs": [rows["Blog"]["ref"]],
+                    },
+                    {
+                        "title": "Election update",
+                        "text": "Election",
+                        "topic": "us",
+                        "refs": [rows["Wire"]["ref"]],
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr("ufifeed.digest.codex_complete", complete)
+    parts = await Digests(config, credentials, store, None).build(
+        now - timedelta(hours=2), now, preview=True
+    )
+    assert len(parts) == 2
+    assert "<b>США</b>" in parts[0] and "Model release" not in parts[0]
+    assert "<b>AI</b>" in parts[1] and "Model release" in parts[1]
+    assert all("<b>Другие новости</b>" not in part for part in parts)

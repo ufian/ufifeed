@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS messages (
     PRIMARY KEY(source_id, id)
 );
 CREATE INDEX IF NOT EXISTS message_window ON messages(date, source_id);
+CREATE INDEX IF NOT EXISTS message_source_window ON messages(source_id, date);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY, slot TEXT NOT NULL UNIQUE, start TEXT NOT NULL,
     end TEXT NOT NULL, created_at TEXT NOT NULL, mode TEXT NOT NULL
@@ -576,6 +577,23 @@ class Store:
             )
         ]
         return sorted(set(recent + older)), older[-1] if older else 0
+
+    def channel_rates(self, source_ids: set[int], end: datetime) -> dict[int, float | None]:
+        """Observed posts per day, including quiet days, over up to two weeks."""
+        cutoff = end - timedelta(days=14)
+        rows = self.conn.execute(
+            """SELECT s.id,s.since,COUNT(m.id) AS posts
+            FROM sources s LEFT JOIN messages m ON m.source_id=s.id
+                AND m.date>=MAX(s.since,?) AND m.date<?
+            WHERE s.enabled=1 AND s.kind='channel' GROUP BY s.id""",
+            (stamp(cutoff), stamp(end)),
+        )
+        rates = {}
+        for row in rows:
+            if row["id"] in source_ids:
+                days = (end - max(cutoff, parse(row["since"]))).total_seconds() / 86400
+                rates[row["id"]] = round(row["posts"] / days, 1) if days >= 1 else None
+        return rates
 
     def candidates(self, start: datetime, end: datetime) -> list[dict]:
         rows = self.conn.execute(

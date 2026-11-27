@@ -1,0 +1,8 @@
+{
+  "russia_ukraine_war": ["ukrain*", "kyiv", "donbas*", "crimea", "zelensky*", "украин*", "киев*", "донбасс*", "крым*", "зеленск*"],
+  "war_context": ["war", "invasion", "missile", "troops", "frontline", "ceasefire", "война", "войны", "войне", "вторжение", "удар", "фронт", "перемирие", "всу", "сво"],
+  "ai": ["ai", "llm", "chatgpt", "openai", "deepseek", "нейросет*", "ии"],
+  "economy": ["econom*", "inflation", "gdp", "recession", "tariff*", "inflationary", "рынок", "эконом*", "инфляц*", "ввп", "тариф*", "рецесси*"],
+  "us": ["usa", "american*", "washington", "trump", "congress", "сша", "американ*", "вашингтон*", "трамп*", "конгресс*"],
+  "russia": ["russia*", "moscow", "kremlin", "putin", "росси*", "москв*", "кремл*", "путин*"]
+}

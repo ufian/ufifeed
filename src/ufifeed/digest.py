@@ -7,6 +7,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timedelta
+from typing import Literal, get_args
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -15,9 +16,38 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufifeed.codex_provider import CodexError
 from ufifeed.codex_provider import complete as codex_complete
 from ufifeed.config import Config, Credentials, Schedule
-from ufifeed.language import LANGUAGES, digest_labels, language_code
+from ufifeed.language import LANGUAGES, digest_labels, language_code, news_keywords
 from ufifeed.store import Store
 from ufifeed.timeutil import latest_slot, parse, stamp, utcnow
+
+NewsTopic = Literal["russia", "russia_ukraine_war", "us", "economy", "ai", "other"]
+NEWS_TOPICS = get_args(NewsTopic)
+TOPIC_PRIORITY = ("russia_ukraine_war", "ai", "economy", "us", "russia")
+
+
+def editorial_weight(posts_per_day: float | None) -> float:
+    if posts_per_day is None:
+        return 1.0
+    if posts_per_day <= 5:
+        return 1.35
+    if posts_per_day >= 25:
+        return 0.8
+    return 1.0
+
+
+def extractive_topic(text: str) -> str:
+    words = set(re.findall(r"[^\W_]+", text.casefold()))
+    keywords = news_keywords()
+    for topic in TOPIC_PRIORITY:
+        if topic == "russia_ukraine_war" and not words.intersection(keywords["war_context"]):
+            continue
+        if any(
+            word.startswith(key[:-1]) if key.endswith("*") else word == key
+            for key in keywords[topic]
+            for word in words
+        ):
+            return topic
+    return "other"
 
 
 class DigestError(Exception):
@@ -132,6 +162,7 @@ class AISummary(BaseModel):
     title: str = Field(default="", max_length=120)
     text: str = Field(min_length=1, max_length=1200)
     refs: list[int] = Field(min_length=1, max_length=5)
+    topic: NewsTopic = "other"
 
 
 class AIResult(BaseModel):
@@ -159,10 +190,20 @@ async def analyze(
         else min(600, max(80, config.ai.max_input_chars // (limit * 4)))
     )
     objective = (
-        "Combine reporting from ALL channels into an overall picture of important world events. "
-        "Prioritize changes with broad impact, explain what changed, why it matters and likely "
-        "consequences, separate uncertainty and conflicting reports. Group related events across "
-        "sources. Avoid a channel-by-channel or post-by-post roundup. Skip ads and trivial updates."
+        "Combine reporting from ALL channels into an overall picture, organized by topic. "
+        "Set the topic field to exactly one code according to the story's main angle: "
+        "russia_ukraine_war for Russia's war against Ukraine, including diplomacy directly "
+        "about it; ai for artificial intelligence; economy for economic, business or market "
+        "developments; us for other news about the United States; russia for other news "
+        "about Russia; other for everything else. Prefer the war or a focused topic over "
+        "a country label when it is the main angle. Merge the same story across sources and "
+        "topics. If a topic has material developments, preserve at least one when space allows. "
+        "posts_per_day is an observed recent publication rate (null means insufficient history). "
+        "Use editorial_weight as a modest ranking signal. Give substantive analysis from "
+        "infrequent sources extra consideration and avoid volume bias from busy news feeds. "
+        "Frequency measures neither credibility nor relevance. Rank by impact, evidence and "
+        "novelty first. Retain rare substantive findings during intermediate synthesis. "
+        "Explain what changed and why it matters, attribute uncertainty and skip ads."
         if profile == "world"
         else "Summarize discussions in this ONE group chat: main topics, participant positions, "
         "agreements, decisions and unresolved questions. Use reply/topic context. Pay particular "
@@ -199,7 +240,7 @@ async def analyze(
     key = hashlib.sha256(
         json.dumps(
             {
-                "version": 4,
+                "version": 5,
                 "prompt": system,
                 "records": records,
                 "provider": config.ai.provider,
@@ -219,7 +260,13 @@ async def analyze(
             "The daily AI request limit is exhausted (00:00 UTC reset). Partial analysis is saved."
         )
     schema = AIResult.model_json_schema()
-    schema["$defs"]["AISummary"]["required"] = ["title", "text", "refs"]
+    item_schema = schema["$defs"]["AISummary"]
+    item_schema["required"] = ["title", "text", "refs"]
+    if profile == "world":
+        item_schema["required"].append("topic")
+        item_schema["properties"]["topic"].pop("default", None)
+    else:
+        item_schema["properties"].pop("topic")
     schema["$defs"]["AISummary"]["properties"]["title"]["minLength"] = 1
     schema["$defs"]["AISummary"]["properties"]["title"].pop("default", None)
     schema["$defs"]["AISummary"]["properties"]["text"]["maxLength"] = text_limit
@@ -312,6 +359,13 @@ async def summarize(
         }
         for ref, row in originals.items()
     ]
+    source_signals = {}
+    if profile == "world":
+        for record, row in zip(records, rows, strict=True):
+            rate = row.get("posts_per_day")
+            signal = {"posts_per_day": rate, "editorial_weight": editorial_weight(rate)}
+            source_signals[record["ref"]] = signal
+            record.update(signal)
     chunks = batches(records, config.ai.max_input_chars)
     store.set(
         "ai_progress",
@@ -360,6 +414,13 @@ async def summarize(
         for level in range(12):
             if not findings:
                 break
+            if profile == "world":
+                for finding in findings:
+                    signal = max(
+                        (source_signals[ref] for ref in finding["refs"]),
+                        key=lambda source: source["editorial_weight"],
+                    )
+                    finding.update(signal)
             groups = batches(findings, config.ai.max_input_chars)
             reduced = []
             for group in groups:
@@ -386,6 +447,7 @@ async def summarize(
     return [
         {
             "title": item.get("title", ""),
+            "topic": item.get("topic", "other"),
             "text": item["text"],
             "sources": [originals[ref] for ref in dict.fromkeys(item["refs"])],
         }
@@ -433,12 +495,10 @@ class Digests:
         parts = []
         for key in sorted(streams, key=lambda key: (key != "world", str(key))):
             stream = streams[key]
-            section = (
-                labels["world_title"]
-                if key == "world"
-                else labels["group_title"].format(title=escaped_clip(stream[0]["title"], 120))
-            )
-            section_header = header + "\n<b>" + section + "</b>"
+            if key == "world":
+                rates = self.store.channel_rates({row["source_id"] for row in stream}, end)
+                for row in stream:
+                    row["posts_per_day"] = rates.get(row["source_id"])
             if mode == "ai":
                 summaries = await summarize(
                     self.config,
@@ -450,43 +510,70 @@ class Digests:
                     language=language,
                     profile="world" if key == "world" else "group",
                 )
-                section_header += "\n" + labels["ai_input_coverage"].format(
-                    sources=len({r["source_id"] for r in stream}), messages=len(stream)
-                )
             else:
                 ranked = sorted(
                     stream,
-                    key=lambda r: (bool(r.get("deleted")), r.get("reaction_count") or 0, r["date"]),
+                    key=lambda row: (
+                        bool(row.get("deleted")),
+                        editorial_weight(row.get("posts_per_day")) if key == "world" else 1.0,
+                        row.get("reaction_count") or 0,
+                        row["date"],
+                    ),
                     reverse=True,
                 )
-                summaries = [
-                    {"text": r["text"] or r.get("media_kind") or labels["no_text"], "sources": [r]}
-                    for r in ranked[: self.config.digest.max_items]
+                summaries = []
+                topic_counts: dict[str, int] = {}
+                for row in ranked:
+                    topic = extractive_topic(row["text"]) if key == "world" else "other"
+                    count = topic_counts.get(topic, 0)
+                    if count >= self.config.digest.max_items:
+                        continue
+                    topic_counts[topic] = count + 1
+                    summaries.append(
+                        {
+                            "topic": topic,
+                            "sources": [row],
+                            "text": row["text"] or row.get("media_kind") or labels["no_text"],
+                        }
+                    )
+
+            if key == "world":
+                by_topic: dict[str, list[dict]] = {}
+                seen: set[str] = set()
+                for summary in summaries:
+                    identity = " ".join(
+                        (summary.get("title") or summary["text"]).casefold().split()
+                    )
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    by_topic.setdefault(summary["topic"], []).append(summary)
+                sections = [
+                    (labels[f"news_{topic}"], by_topic[topic])
+                    for topic in NEWS_TOPICS
+                    if topic in by_topic
                 ]
-            entries = []
-            for summary in summaries:
-                sources = []
-                for original in summary["sources"]:
-                    title = escaped_clip(original["title"], 100)
-                    link = message_link(original)
-                    citation = f'<a href="{link}">{title}</a>' if link else title
-                    if original.get("deleted"):
-                        citation += " " + labels["deleted_mark"]
-                    if original.get("reaction_count"):
-                        citation += f" [♥ {original['reaction_count']}]"
-                    sources.append(citation)
-                title = summary.get("title") or summary["text"].splitlines()[0][:120]
-                entries.append(
-                    f"<b>{escaped_clip(title, 300)}</b>\n"
-                    f"<blockquote expandable>{escaped_clip(summary['text'], 1500)}\n"
-                    + "; ".join(sources)
-                    + "</blockquote>"
+            else:
+                sections = [
+                    (
+                        labels["group_title"].format(title=escaped_clip(stream[0]["title"], 120)),
+                        summaries,
+                    )
+                ]
+            for section, items in sections:
+                section_header = header + "\n<b>" + section + "</b>"
+                if mode == "ai" and key != "world":
+                    section_header += "\n" + labels["ai_input_coverage"].format(
+                        sources=len({r["source_id"] for r in stream}), messages=len(stream)
+                    )
+                entries = [self.render_entry(summary, labels) for summary in items]
+                parts.extend(
+                    render_parts(
+                        section_header,
+                        entries or [labels["empty"]],
+                        continuation=labels["continued_suffix"],
+                    )
                 )
-            if not entries:
-                entries = [labels["empty"]]
-            parts.extend(
-                render_parts(section_header, entries, continuation=labels["continued_suffix"])
-            )
         if mode == "ai" and recipient_id is None:
             self.store.set(
                 "last_ai_input",
@@ -498,7 +585,29 @@ class Digests:
                 },
             )
             self.store.set("ai_progress", {"state": "complete"})
+        if not parts and (preview or self.config.digest.send_when_empty):
+            return [header + "\n\n" + labels["empty"]]
         return parts
+
+    @staticmethod
+    def render_entry(summary: dict, labels: dict[str, str]) -> str:
+        sources = []
+        for original in summary["sources"]:
+            title = escaped_clip(original["title"], 100)
+            link = message_link(original)
+            citation = f'<a href="{link}">{title}</a>' if link else title
+            if original.get("deleted"):
+                citation += " " + labels["deleted_mark"]
+            if original.get("reaction_count"):
+                citation += f" [♥ {original['reaction_count']}]"
+            sources.append(citation)
+        title = summary.get("title") or summary["text"].splitlines()[0][:120]
+        return (
+            f"<b>{escaped_clip(title, 300)}</b>\n"
+            f"<blockquote expandable>{escaped_clip(summary['text'], 1500)}\n"
+            + "; ".join(sources)
+            + "</blockquote>"
+        )
 
     async def manual(self) -> int | None:
         async with self.lock:

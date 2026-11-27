@@ -18,3 +18,9 @@ def language_code(value: str) -> str:
 def digest_labels(code: str) -> dict[str, str]:
     resource = files("ufifeed.locales").joinpath(language_code(code) + ".json")
     return json.loads(resource.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=1)
+def news_keywords() -> dict[str, list[str]]:
+    resource = files("ufifeed.locales").joinpath("news_keywords.json")
+    return json.loads(resource.read_text(encoding="utf-8"))
