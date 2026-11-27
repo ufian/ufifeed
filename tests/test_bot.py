@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.methods import SendMessage
@@ -89,14 +89,18 @@ async def test_journal_history_and_folder_ai_controls(store, config, credentials
     assert not store.get("ai_folder")
 
 
-async def test_only_owner_can_add_forwarded_media_channel(store, config, monkeypatch):
+async def test_only_owner_and_subscribers_can_add_forwarded_media_channel(
+    store, config, monkeypatch
+):
     import ufifeed.bot as controls_module
 
     reader = SimpleNamespace(add_forwarded_channel=AsyncMock(return_value="Channel added"))
     controls = Controls(config, store, reader, None)
     monkeypatch.setattr(controls_module, "reply", AsyncMock())
+    assert store.join(789, store.create_invite({-1000000000123}))
     for user_id, chat_type, chat_id in [
         (456, "private", 456),
+        (789, "private", 789),
         (123, "group", -12),
         (123, "private", 123),
     ]:
@@ -113,7 +117,10 @@ async def test_only_owner_can_add_forwarded_media_channel(store, config, monkeyp
             },
         )
         await controls.handle(message)
-    reader.add_forwarded_channel.assert_awaited_once_with(-1000000000123, "example")
+    assert reader.add_forwarded_channel.await_args_list == [
+        call(-1000000000123, "example", recipient_id=789),
+        call(-1000000000123, "example"),
+    ]
 
 
 async def test_invite_message_has_a_working_link_and_manual_join_code(store, config, monkeypatch):
@@ -142,3 +149,17 @@ async def test_invite_message_has_a_working_link_and_manual_join_code(store, con
     assert "You are subscribed" in await controls.subscriber_command(message, 456, "/join", code)
     assert store.subscriber(456)
     assert "already used" in await controls.subscriber_command(message, 789, "/join", code)
+
+
+async def test_subscriber_add_command_accepts_a_public_link(store, config):
+    assert store.join(456, store.create_invite({-1000000000123}))
+    reader = SimpleNamespace(add_source=AsyncMock(return_value="Source added."))
+    controls = Controls(config, store, reader, None)
+    await controls.subscriber_command(None, 789, "/add", "@example")
+    await controls.subscriber_command(None, 456, "/add", "https://t.me/+private")
+    reader.add_source.assert_not_awaited()
+    assert (
+        await controls.subscriber_command(None, 456, "/add", "https://t.me/example/123")
+        == "Source added."
+    )
+    reader.add_source.assert_awaited_once_with("example", recipient_id=456)

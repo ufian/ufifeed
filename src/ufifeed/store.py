@@ -225,6 +225,18 @@ class Store:
                 )
             self._expire_recipient(recipient_id)
 
+    def enable_subscriber_source(self, user_id: int, source_id: int) -> None:
+        subscriber = self.subscriber(user_id)
+        if not subscriber:
+            raise ValueError("Subscriber is unavailable")
+        granted = set(json.loads(subscriber["granted"])) | {source_id}
+        selected = set(json.loads(subscriber["selected"])) | {source_id}
+        with self.conn:
+            self.conn.execute(
+                "UPDATE subscribers SET granted=?,selected=? WHERE id=?",
+                (json.dumps(sorted(granted)), json.dumps(sorted(selected)), user_id),
+            )
+
     def _expire_recipient(self, recipient_id: int | None) -> None:
         self.conn.execute(
             "UPDATE outbox SET payload=?,status='expired',error=NULL "
@@ -288,7 +300,7 @@ class Store:
         """Apply membership only after every peer has been resolved successfully."""
         active = {s["id"] for s in self.sources()}
         with self.conn:
-            if active != {source["id"] for source in sources}:
+            if active - {source["id"] for source in sources}:
                 self._invalidate_pending()
             self.conn.execute("UPDATE sources SET enabled=0")
             for source in sources:

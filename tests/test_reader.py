@@ -131,7 +131,10 @@ async def test_concurrent_collection_requests_share_the_completed_pass(store, co
     reader.reconcile.assert_awaited_once()
 
 
-async def test_forwarded_public_channel_is_joined_muted_and_added(store, config, credentials):
+@pytest.mark.parametrize("recipient_id", [None, 456])
+async def test_forwarded_public_channel_is_joined_muted_and_added(
+    store, config, credentials, recipient_id
+):
     from telethon import functions
     from telethon.tl import types
 
@@ -141,6 +144,10 @@ async def test_forwarded_public_channel_is_joined_muted_and_added(store, config,
     store.set("folder_id", 214)
     reader = Reader(config, credentials, store)
     existing = types.InputPeerChannel(999, 1)
+    existing_source = {"id": -1000000000999, "title": "Existing"}
+    store.sync_folder([existing_source], utcnow())
+    for user_id in (456, 789):
+        assert store.join(user_id, store.create_invite({existing_source["id"]}))
     folder = types.DialogFilter(214, types.TextWithEntities("Ufifeed", []), [], [existing], [])
     reader.folders = AsyncMock(return_value=[{"id": 214, "filter": folder}])
     entity = types.Channel(
@@ -155,7 +162,9 @@ async def test_forwarded_public_channel_is_joined_muted_and_added(store, config,
     )
     reader.client = AsyncMock(return_value=True)
     reader.client.get_entity.return_value = entity
-    response = await reader.add_forwarded_channel(-1000000000123, "forwarded")
+    response = await reader.add_forwarded_channel(
+        -1000000000123, "forwarded", recipient_id=recipient_id
+    )
     assert "Notifications are muted" in response
     requests = [call.args[0] for call in reader.client.await_args_list]
     assert [type(r) for r in requests] == [
@@ -167,5 +176,18 @@ async def test_forwarded_public_channel_is_joined_muted_and_added(store, config,
     assert requests[2].filter.include_peers == [existing, types.InputPeerChannel(123, 42)]
     assert reader.wake.is_set()
     entity.left = False
-    await reader.add_forwarded_channel(-1000000000123, "forwarded")
+    await reader.add_forwarded_channel(-1000000000123, "forwarded", recipient_id=recipient_id)
+    store.sync_folder([existing_source, {"id": -1000000000123, "title": "Forwarded"}], utcnow())
+    assert (-1000000000123 in store.selected_sources(456)) == (recipient_id == 456)
+    assert -1000000000123 not in store.selected_sources(789)
     assert reader.client.await_count == 3
+
+
+async def test_subscriber_cannot_add_private_forward(store, config, credentials):
+    store.set("folder_id", 214)
+    assert store.join(456, store.create_invite({-1000000000123}))
+    reader = Reader(config, credentials, store)
+    reader.client = AsyncMock()
+    with pytest.raises(ReaderError, match="public channels"):
+        await reader.add_forwarded_channel(-1000000000999, None, recipient_id=456)
+    reader.client.assert_not_awaited()

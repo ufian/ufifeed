@@ -19,6 +19,7 @@ from aiogram.types import (
     LinkPreviewOptions,
     Message,
     MessageOriginChannel,
+    MessageOriginChat,
     WebAppInfo,
 )
 
@@ -36,6 +37,7 @@ HELP = """ufifeed — private digests from a dedicated Telegram account folder.
 /folders — list folders in the reader account
 /folder ID — choose a folder (0 disables collection)
 /sources — sources and collection status
+/add @username — add a public channel or group
 /subscribe all|none|ID [ID ...] — choose sources for your digest
 /settings — open your digest settings
 /invite ID [ID ...] — create a single-use invitation for selected sources
@@ -119,10 +121,24 @@ class Controls:
         command, _, argument = (message.text or "").partition(" ")
         command, argument = command.split("@")[0].lower(), argument.strip()
         try:
-            if recipient_id is None and isinstance(message.forward_origin, MessageOriginChannel):
-                chat = message.forward_origin.chat
-                text = await self.reader.add_forwarded_channel(chat.id, chat.username)
-            elif not message.text or message.forward_origin is not None:
+            origin = message.forward_origin
+            if isinstance(origin, (MessageOriginChannel, MessageOriginChat)):
+                chat = (
+                    origin.chat if isinstance(origin, MessageOriginChannel) else origin.sender_chat
+                )
+                if recipient_id is None:
+                    text = await self.reader.add_forwarded_channel(chat.id, chat.username)
+                elif self.store.subscriber(recipient_id):
+                    text = await self.reader.add_forwarded_channel(
+                        chat.id, chat.username, recipient_id=recipient_id
+                    )
+                else:
+                    return
+            elif origin is not None:
+                if recipient_id is not None and not self.store.subscriber(recipient_id):
+                    return
+                text = "This forward has no source chat. Use /add @username for a public source."
+            elif not message.text:
                 return
             elif recipient_id is not None:
                 text = await self.subscriber_command(message, user_id, command, argument)
@@ -139,7 +155,8 @@ class Controls:
                         f"1. Open {bot_url}?start=join_{code} and tap Start.\n"
                         "2. Tap Digest settings or send /settings to choose your sources.\n"
                         "3. Digests will arrive in your private chat with the bot. "
-                        "Send /schedule to see delivery times.\n\n"
+                        "Send /schedule to see delivery times.\n"
+                        "To add a public source, forward a channel post or send /add @username.\n\n"
                         f"If the invite link doesn't work, open {bot_url} "
                         "and send this command in the private chat:\n"
                         f"/join {code}\n\n"
@@ -161,6 +178,16 @@ class Controls:
             log.warning("Control command failed: %s", type(exc).__name__)
             text = f"Command failed: {type(exc).__name__}. Try again later."
         await reply(message, text)
+
+    async def add_public_source(self, argument: str, recipient_id: int | None) -> str:
+        match = re.fullmatch(
+            r"(?:@|(?:https://)?t\.me/(?:s/)?)([A-Za-z][A-Za-z0-9_]{3,31})(?:/\d+)?/?",
+            argument,
+            re.IGNORECASE,
+        )
+        if not match:
+            return "Use /add @username or /add https://t.me/username for a public source."
+        return await self.reader.add_source(match[1], recipient_id=recipient_id)
 
     def parse_sources(self, argument: str, recipient_id: int | None) -> set[int]:
         if argument == "all":
@@ -205,6 +232,8 @@ class Controls:
         if command == "/settings":
             await self.send_settings(message)
             return ""
+        if command == "/add":
+            return await self.add_public_source(argument, user_id)
         if command == "/subscribe":
             return self.select_sources(user_id, argument)
         if command == "/sources":
@@ -227,6 +256,7 @@ class Controls:
             return "Subscription ended."
         return (
             "/settings — choose digest sources\n/sources — available sources\n"
+            "/add @username — add a public source, or forward a channel post\n"
             "/subscribe all|none|ID [ID ...] — choose sources\n"
             "/language en|ru — digest language\n/schedule — delivery times\n"
             "/unsubscribe — stop receiving digests"
@@ -236,6 +266,8 @@ class Controls:
         if command in {"/start", "/help"}:
             self.store.set("started", True)
             return HELP
+        if command == "/add":
+            return await self.add_public_source(argument, None)
         if command == "/subscribe":
             return self.select_sources(None, argument)
         if command == "/subscribers":
@@ -479,6 +511,7 @@ async def set_commands(bot: Bot, owner_id: int) -> None:
                 ("status", "Status"),
                 ("folders", "Choose a folder"),
                 ("sources", "Sources"),
+                ("add", "Add a public source"),
                 ("journal", "Message journal statistics"),
                 ("history", "Observed message versions"),
                 ("topics", "Topics"),
@@ -495,6 +528,7 @@ async def set_commands(bot: Bot, owner_id: int) -> None:
         [
             BotCommand(command="settings", description="Digest settings"),
             BotCommand(command="sources", description="Available sources"),
+            BotCommand(command="add", description="Add a public source"),
             BotCommand(command="language", description="Digest language"),
             BotCommand(command="schedule", description="Delivery times"),
             BotCommand(command="help", description="All commands"),

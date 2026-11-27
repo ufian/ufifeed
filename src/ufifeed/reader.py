@@ -153,45 +153,82 @@ class Reader:
             if getattr(folder, "id", 0) > 0 and hasattr(folder, "include_peers")
         ]
 
-    async def add_forwarded_channel(self, source_id: int, username: str | None) -> str:
+    async def add_forwarded_channel(
+        self, source_id: int, username: str | None, *, recipient_id: int | None = None
+    ) -> str:
+        return await self.add_source(username, source_id=source_id, recipient_id=recipient_id)
+
+    async def add_source(
+        self,
+        username: str | None,
+        *,
+        source_id: int | None = None,
+        recipient_id: int | None = None,
+    ) -> str:
         async with self.lock:
+            subscriber = self.store.subscriber(recipient_id) if recipient_id is not None else None
+            if recipient_id is not None and not subscriber:
+                raise ReaderError("You need an invitation to add sources.")
+            if subscriber and not username:
+                raise ReaderError("Subscribers can add public channels and groups only.")
+
+            def check_access() -> None:
+                if recipient_id is not None:
+                    current = self.store.subscriber(recipient_id)
+                    if not current or current["joined_at"] != subscriber["joined_at"]:
+                        raise ReaderError("Your subscription changed. Try again.")
+
             folder_id = self.store.get("folder_id")
             if not folder_id:
-                raise ReaderError("Choose a reader folder before forwarding a channel post.")
+                raise ReaderError("The owner must choose a reader folder first.")
             retry_at = self.store.get("reader_retry_at")
             if retry_at and parse(retry_at) > utcnow():
-                raise ReaderError(
-                    "Telegram is rate limiting the reader. Try forwarding again later."
-                )
+                raise ReaderError("Telegram is rate limiting the reader. Try again later.")
             try:
                 folder = await self.forwarding_folder(folder_id)
-                already_in_folder = source_id in {
-                    utils.get_peer_id(p) for p in folder_peers(folder)
-                }
                 try:
                     entity = await self.client.get_entity(username or source_id)
-                except (ValueError, errors.ChannelPrivateError, errors.UsernameNotOccupiedError):
+                except (
+                    ValueError,
+                    errors.ChannelPrivateError,
+                    errors.UsernameNotOccupiedError,
+                    errors.UsernameInvalidError,
+                ):
                     raise ReaderError(
                         "The reader account cannot open this channel. For a private channel, "
-                        "join it from the reader account first, then forward the post again."
+                        "the owner must give the reader account access first."
                     ) from None
                 if (
                     not isinstance(entity, types.Channel)
-                    or not entity.broadcast
-                    or utils.get_peer_id(entity) != source_id
+                    or not (entity.broadcast or entity.megagroup or entity.gigagroup)
+                    or (source_id is not None and utils.get_peer_id(entity) != source_id)
                 ):
-                    raise ReaderError("Telegram could not verify the original broadcast channel.")
+                    raise ReaderError("Telegram could not verify the original channel or group.")
+                if subscriber and not (
+                    entity.username or any(alias.active for alias in entity.usernames or [])
+                ):
+                    raise ReaderError("Subscribers can add public channels and groups only.")
+                source_id = utils.get_peer_id(entity)
+                already_in_folder = source_id in {
+                    utils.get_peer_id(p) for p in folder_peers(folder)
+                }
                 if entity.noforwards:
                     raise ReaderError("This channel does not allow forwarding.")
                 if self.store.get("folder_id") != folder_id:
                     raise ReaderError("The reader folder changed. Forward the post again.")
+                check_access()
                 if already_in_folder and not entity.left:
-                    return "This channel is already in the reader folder."
+                    if recipient_id is None:
+                        return "This source is already in the reader folder."
+                    self.store.enable_subscriber_source(recipient_id, source_id)
+                    self.wake.set()
+                    return "Source added to your digest."
                 peer = utils.get_input_peer(entity)
                 if entity.left:
                     await self.client(
                         functions.channels.JoinChannelRequest(utils.get_input_channel(entity))
                     )
+                check_access()
                 muted = await self.client(
                     functions.account.UpdateNotifySettingsRequest(
                         types.InputNotifyPeer(peer),
@@ -204,6 +241,7 @@ class Reader:
                     raise ReaderError("The channel is accessible, but muting failed. Try again.")
                 # Fetch the latest folder after joining and muting to preserve unrelated edits.
                 folder = await self.forwarding_folder(folder_id)
+                check_access()
                 if source_id not in {utils.get_peer_id(item) for item in folder_peers(folder)}:
                     folder.exclude_peers = [
                         item
@@ -222,14 +260,21 @@ class Reader:
                             "The channel is muted, but adding it to the folder failed."
                         )
                 self.wake.set()
-                return "Channel added to the reader folder. Notifications are muted."
+                check_access()
+                if recipient_id is not None:
+                    self.store.enable_subscriber_source(recipient_id, source_id)
+                    return (
+                        "Source added. It will appear in your digest after synchronization. "
+                        "Notifications are muted."
+                    )
+                return "Source added to the reader folder. Notifications are muted."
             except errors.InviteRequestSentError:
-                return "Join request sent. After approval, forward a post again to add the channel."
+                return "Join request sent. After approval, try adding the source again."
             except errors.FloodWaitError as exc:
                 self.flood_pause(exc.seconds)
                 raise ReaderError(
                     f"Telegram requested a {exc.seconds}-second pause. "
-                    "Forward the post again later."
+                    "Try adding the source again later."
                 ) from None
 
     async def forwarding_folder(self, folder_id: int):
