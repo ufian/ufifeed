@@ -498,8 +498,81 @@ async def test_dated_digest_reads_retained_posts_without_advancing_schedule(
     digests = Digests(config, credentials, store, reader)
     window_end = store.last_window_end()
     await digests.manual((start, end))
+    reader.sync_all.assert_not_awaited()
     assert store.last_window_end() == window_end
     assert digests.preparation_started_at is None
     payload = store.claim()["payload"]
     assert "Inside the requested day" in payload
     assert "Earlier item edited" not in payload
+
+
+async def test_calendar_week_reuses_daily_analysis_and_rechecks_edits(
+    store, config, credentials, item, monkeypatch
+):
+    import json
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    from ufifeed.timeutil import local_slot
+
+    zone = ZoneInfo("America/Los_Angeles")
+    today = utcnow().astimezone(zone).date()
+    first, second, end = [
+        local_slot(today - timedelta(days=offset), "00:00", zone.key) for offset in (3, 2, 1)
+    ]
+    source = -1000000000123
+    config.ai.enabled, config.ai.provider = True, "codex"
+    store.set("mode", "ai")
+    with store.conn:
+        store.conn.execute("UPDATE sources SET ai_allowed=1")
+    store.upsert_live(source, {**item, "date": first, "text": "First day economy"})
+    store.upsert_live(source, {**item, "id": 2, "date": second, "text": "Second day economy"})
+    calls = []
+
+    async def complete(ai, instructions, records, schema):
+        calls.append([record["text"] for record in records])
+        return json.dumps(
+            {
+                "items": [
+                    {
+                        "title": record["text"],
+                        "text": record["text"],
+                        "topic": "economy",
+                        "refs": record["refs"] if "refs" in record else [record["ref"]],
+                    }
+                    for record in records
+                ]
+            }
+        )
+
+    monkeypatch.setattr("ufifeed.digest.codex_complete", complete)
+    reader = SimpleNamespace(sync_all=AsyncMock(side_effect=AssertionError("Unexpected sync")))
+    digests = Digests(config, credentials, store, reader)
+    await digests.manual((second, end))
+    assert calls == [["Second day economy"]]
+
+    await digests.manual((first, end))
+    assert calls == [
+        ["Second day economy"],
+        ["First day economy"],
+        ["First day economy", "Second day economy"],
+    ]
+    await digests.manual((first, end))
+    assert len(calls) == 3
+
+    store.upsert_live(
+        source,
+        {
+            **item,
+            "id": 2,
+            "date": second,
+            "edited_at": utcnow(),
+            "text": "Changed second day economy",
+        },
+    )
+    await digests.manual((first, end))
+    assert calls[3:] == [
+        ["Changed second day economy"],
+        ["First day economy", "Changed second day economy"],
+    ]
+    reader.sync_all.assert_not_awaited()

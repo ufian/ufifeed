@@ -578,6 +578,19 @@ class Store:
         ]
         return sorted(set(recent + older)), older[-1] if older else 0
 
+    def has_recent_snapshot(self, now: datetime, max_age_seconds: int) -> bool:
+        folder_synced_at = self.get("folder_synced_at")
+        if not folder_synced_at or self.get("folder_error") or self.get("reader_retry_at"):
+            return False
+        cutoff = now - timedelta(seconds=max_age_seconds)
+        return parse(folder_synced_at) >= cutoff and all(
+            source["initialized"]
+            and not source["error"]
+            and source["last_sync"]
+            and parse(source["last_sync"]) >= cutoff
+            for source in self.sources()
+        )
+
     def channel_rates(self, source_ids: set[int], end: datetime) -> dict[int, float | None]:
         """Observed posts per day, including quiet days, over up to two weeks."""
         cutoff = end - timedelta(days=14)

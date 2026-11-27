@@ -81,3 +81,6 @@ Owner pairing uses a one-time random bot command. Middleware checks numeric user
 Tests cover collection/live races, empty initial imports, updates, encryption, membership changes, retention, restart-safe delivery, uncertain outcomes, schedule/DST boundaries, owner-only controls, login cancellation and QR refresh/2FA, client-selected language, and AI request/citation boundaries. Container checks verify pinned dependencies, read-only runtime storage, and packaged resources.
 
 Real reader authorization, source access, model access, and delivery are checked separately on the target VM. No test credentials are committed.
+
+
+Closed calendar previews use the retained journal without a Telegram rescan. Current previews also use the journal when the folder and all sources successfully synchronized within the configured reconciliation interval. Calendar previews split analysis into local publication days, with source rates calculated at each day’s cutoff. An encrypted cache keyed by normalized input, prompt, language and provider reuses daily topic findings across day and week requests. Changed messages, reactions or source signals produce new input keys. A week still needs final synthesis across its daily findings. Cache entries expire on the derived-data retention schedule and are cleared by source purge or redaction.

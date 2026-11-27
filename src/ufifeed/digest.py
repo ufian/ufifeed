@@ -7,7 +7,7 @@ import json
 import re
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal, get_args
 from zoneinfo import ZoneInfo
 
@@ -19,7 +19,7 @@ from ufifeed.codex_provider import complete as codex_complete
 from ufifeed.config import Config, Credentials, Schedule
 from ufifeed.language import LANGUAGES, digest_labels, language_code, news_keywords
 from ufifeed.store import Store
-from ufifeed.timeutil import latest_slot, parse, stamp, utcnow
+from ufifeed.timeutil import latest_slot, local_slot, parse, stamp, utcnow
 
 NewsTopic = Literal["russia", "russia_ukraine_war", "us", "economy", "ai", "other"]
 NEWS_TOPICS = get_args(NewsTopic)
@@ -317,6 +317,35 @@ async def analyze(
         ) from None
 
 
+async def analyze_batch(
+    config: Config,
+    credentials: Credentials,
+    store: Store,
+    records: list[dict],
+    *,
+    language: str,
+    profile: str,
+    final: bool,
+) -> list[dict]:
+    # Number references within this batch so adding an earlier day does not change its cache key.
+    refs = dict(enumerate((record["ref"] for record in records), 1))
+    local_records = [{**record, "ref": ref} for ref, record in enumerate(records, 1)]
+    findings = await analyze(
+        config,
+        credentials,
+        store,
+        local_records,
+        language=language,
+        profile=profile,
+        stage="complete input" if final else "input analysis",
+        final=final,
+    )
+    return [
+        {**item, "refs": list(dict.fromkeys(refs[ref] for ref in item["refs"]))}
+        for item in findings
+    ]
+
+
 async def summarize(
     config: Config,
     credentials: Credentials,
@@ -325,6 +354,7 @@ async def summarize(
     *,
     language: str = "en",
     profile: str = "world",
+    calendar_zone: ZoneInfo | None = None,
 ) -> list[dict]:
     language = language_code(language)
     if not config.ai.enabled:
@@ -367,51 +397,37 @@ async def summarize(
             signal = {"posts_per_day": rate, "editorial_weight": editorial_weight(rate)}
             source_signals[record["ref"]] = signal
             record.update(signal)
-    chunks = batches(records, config.ai.max_input_chars)
-    store.set(
-        "ai_progress",
-        {
-            "stream": profile,
-            "messages": len(rows),
-            "input_batches": len(chunks),
-            "completed_batches": 0,
-        },
-    )
-    if len(chunks) == 1:
-        result = await analyze(
-            config,
-            credentials,
-            store,
-            chunks[0],
-            language=language,
-            profile=profile,
-            stage="complete input",
-            final=True,
-        )
+    if calendar_zone is None:
+        buckets = [records]
     else:
-        findings = []
-        for index, chunk in enumerate(chunks, 1):
-            findings.extend(
-                await analyze(
-                    config,
-                    credentials,
-                    store,
-                    chunk,
-                    language=language,
-                    profile=profile,
-                    stage="input analysis",
-                    final=False,
-                )
+        by_day: dict[date, list[dict]] = {}
+        for record in records:
+            day = parse(record["date"]).astimezone(calendar_zone).date()
+            by_day.setdefault(day, []).append(record)
+        buckets = [by_day[day] for day in sorted(by_day)]
+    chunks = []
+    for bucket in buckets:
+        day_chunks = batches(bucket, config.ai.max_input_chars)
+        chunks.extend((chunk, len(day_chunks) == 1) for chunk in day_chunks)
+
+    progress = {"stream": profile, "messages": len(rows), "input_batches": len(chunks)}
+    store.set("ai_progress", {**progress, "completed_batches": 0})
+    findings = []
+    for index, (chunk, complete_day) in enumerate(chunks, 1):
+        findings.extend(
+            await analyze_batch(
+                config,
+                credentials,
+                store,
+                chunk,
+                language=language,
+                profile=profile,
+                final=complete_day,
             )
-            store.set(
-                "ai_progress",
-                {
-                    "stream": profile,
-                    "messages": len(rows),
-                    "input_batches": len(chunks),
-                    "completed_batches": index,
-                },
-            )
+        )
+        store.set("ai_progress", {**progress, "completed_batches": index})
+    result = findings
+    if len(chunks) > 1:
         for level in range(12):
             if not findings:
                 break
@@ -515,19 +531,18 @@ class Digests:
         for key in sorted(streams, key=lambda key: (key != "world", str(key))):
             stream = streams[key]
             if key == "world":
-                rates = self.store.channel_rates({row["source_id"] for row in stream}, end)
-                for row in stream:
-                    row["posts_per_day"] = rates.get(row["source_id"])
+                self.set_channel_rates(stream, end, zone if publication_window else None)
             if mode == "ai":
                 summaries = await summarize(
                     self.config,
                     self.credentials,
                     self.store,
                     self.store.with_reply_context(stream)
-                    if key != "world" and recipient_id is None
+                    if key != "world" and recipient_id is None and not publication_window
                     else stream,
                     language=language,
                     profile="world" if key == "world" else "group",
+                    calendar_zone=zone if publication_window else None,
                 )
             else:
                 ranked = sorted(
@@ -612,6 +627,25 @@ class Digests:
             return [header + "\n\n" + labels["empty"]]
         return parts
 
+    def set_channel_rates(
+        self, rows: list[dict], end: datetime, calendar_zone: ZoneInfo | None
+    ) -> None:
+        if calendar_zone is None:
+            buckets = [(end, rows)]
+        else:
+            days: dict[date, list[dict]] = {}
+            for row in rows:
+                day = parse(row["date"]).astimezone(calendar_zone).date()
+                days.setdefault(day, []).append(row)
+            buckets = [
+                (min(end, local_slot(day + timedelta(days=1), "00:00", calendar_zone.key)), bucket)
+                for day, bucket in days.items()
+            ]
+        for cutoff, bucket in buckets:
+            rates = self.store.channel_rates({row["source_id"] for row in bucket}, cutoff)
+            for row in bucket:
+                row["posts_per_day"] = rates.get(row["source_id"])
+
     @staticmethod
     def render_entry(summary: dict, labels: dict[str, str]) -> str:
         sources = []
@@ -632,17 +666,26 @@ class Digests:
             + "</blockquote>"
         )
 
+    async def sync_for_preview(self) -> None:
+        for attempt in range(3):
+            if await self.reader.sync_all():
+                return
+            retry_at = self.store.get("reader_retry_at")
+            delay = (parse(retry_at) - utcnow()).total_seconds() + 1 if retry_at else 0
+            if attempt == 2 or not 0 < delay <= 120:
+                raise DigestError("Collection is incomplete. Check /status and try later.")
+            await asyncio.sleep(delay)
+
     async def manual(self, window: tuple[datetime, datetime] | None = None) -> int | None:
         async with self.preparation():
             timezone = self.store.get("schedule")["timezone"]
-            for attempt in range(3):
-                if await self.reader.sync_all():
-                    break
-                retry_at = self.store.get("reader_retry_at")
-                delay = (parse(retry_at) - utcnow()).total_seconds() + 1 if retry_at else 0
-                if attempt == 2 or not 0 < delay <= 120:
-                    raise DigestError("Collection is incomplete. Check /status and try later.")
-                await asyncio.sleep(delay)
+            now = utcnow()
+            today = now.astimezone(ZoneInfo(timezone)).date()
+            closed_period = window is not None and window[1] <= local_slot(today, "00:00", timezone)
+            if not closed_period and not self.store.has_recent_snapshot(
+                now, self.config.telegram.reconcile_interval_seconds
+            ):
+                await self.sync_for_preview()
             signature = self.store.input_signature()
             if window is None:
                 end = utcnow()
