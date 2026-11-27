@@ -23,7 +23,24 @@
           <div class="section-heading"><div><span id="folder-label" class="eyebrow">YOUR READING LIST</span><h2>The bigger picture</h2></div><button id="refresh" class="icon-button" aria-label="Refresh">↻</button></div>
           <p class="intro">World events together. Every discussion in its own context.</p>
           <div id="metrics" class="metrics"></div>
-          <div class="action-card"><div><strong>A fresh perspective</strong><p id="job-status">A preview arrives in your Telegram chat.</p></div><button id="prepare" class="primary">Prepare digest</button></div>
+          <form id="digest-request" class="action-card">
+            <div>
+              <label for="digest-period">Digest period</label>
+              <select id="digest-period">
+                <option value="recent">Recent updates</option>
+                <option value="day">Specific day</option>
+                <option value="week">Calendar week</option>
+              </select>
+              <div id="digest-date-field" hidden>
+                <label id="digest-date-label" for="digest-date">Date</label>
+                <input id="digest-date" type="date" disabled>
+                <p id="digest-date-help" class="muted"></p>
+              </div>
+              <p id="job-status" role="status">A preview arrives in your Telegram chat.</p>
+              <p id="job-elapsed" class="muted" hidden></p>
+            </div>
+            <button id="prepare" class="primary" type="submit">Prepare digest</button>
+          </form>
           <div id="service-error" class="warning" hidden></div>
           <div class="section-heading"><h3>Recent briefings</h3><span id="schedule-label" class="muted"></span></div>
           <div id="briefings" class="stack"></div>

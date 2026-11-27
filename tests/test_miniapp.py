@@ -201,3 +201,42 @@ async def test_guest_settings_only_expose_granted_sources_and_require_active_sub
             assert (await client.post(route, headers=guest, json={})).status == 401
         assert store.revoke(456)
         assert (await client.post(path, headers=guest, json={})).status == 401
+
+
+async def test_calendar_week_request_uses_local_dates_and_exposes_elapsed_start(
+    miniapp, store, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from ufifeed.timeutil import parse
+
+    now = datetime(2026, 11, 5, 20, tzinfo=UTC)
+    monkeypatch.setattr("ufifeed.miniapp.utcnow", lambda: now)
+    gate = asyncio.Event()
+    expected = (datetime(2026, 10, 26, 7, tzinfo=UTC), datetime(2026, 11, 2, 8, tzinfo=UTC))
+
+    async def prepare(window):
+        assert window == expected
+        await gate.wait()
+        return 99
+
+    miniapp.controls.digests.manual = prepare
+    async with TestClient(TestServer(miniapp.app)) as client:
+        for invalid in (
+            {"period": "day"},
+            {"period": "week", "date": "2026-02-30"},
+            {"period": "day", "date": "2026-11-06"},
+        ):
+            response = await client.post("/api/digest", headers=headers(), json=invalid)
+            assert response.status == 400
+        response = await client.post(
+            "/api/digest", headers=headers(), json={"period": "week", "date": "2026-11-01"}
+        )
+        assert response.status == 202
+        response = await client.post("/api/state", headers=headers(), json={})
+        state = await response.json()
+        assert state["digest_today"] == "2026-11-05"
+        assert state["busy"] and parse(state["manual_job"]["requested_at"]) == now
+        gate.set()
+        await miniapp.digest_task
+        assert store.get("manual_job")["run_id"] == 99

@@ -50,12 +50,42 @@ function safeDigest(text) {
   for (const item of parsed.body.childNodes) copy(item, result);
   return result;
 }
+function renderElapsed() {
+  const started = state?.preparation_started_at
+    || (state?.manual_job?.state === "running" ? state.manual_job.requested_at : null);
+  const elapsed = $("job-elapsed");
+  elapsed.hidden = !state?.busy || !started;
+  if (elapsed.hidden) return;
+  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(started)) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  elapsed.textContent = `Elapsed: ${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function renderDigestPeriod() {
+  const period = $("digest-period").value;
+  const date = $("digest-date");
+  $("digest-date-field").hidden = period === "recent";
+  date.disabled = period === "recent";
+  date.required = period !== "recent";
+  if (state?.digest_today) {
+    date.max = state.digest_today;
+    if (!date.value) date.value = state.digest_today;
+  }
+  $("digest-date-label").textContent = period === "week" ? "Any date in the week" : "Date";
+  const calendar = period === "week" ? "Monday through Sunday" : "Midnight to midnight";
+  $("digest-date-help").textContent = state
+    ? `${calendar} in ${state.schedule.timezone}. Uses archived messages.`
+    : calendar;
+}
+
 function render() {
   $("folder-label").textContent = state.folder || "YOUR READING LIST";
   $("metrics").replaceChildren(...[[state.sources.filter(s => s.enabled).length, "Reading sources"], [state.journal.messages, "Archived messages"], [state.journal.deleted, "Deleted, retained"]].map(([value, label]) => {
     const card = node("div", undefined, "metric"); card.append(node("strong", value.toLocaleString()), node("span", label)); return card;
   }));
   $("prepare").disabled = state.busy;
+  renderDigestPeriod();
+  renderElapsed();
   const progress = state.ai_progress;
   $("job-status").textContent = state.busy && state.reader_retry_at && new Date(state.reader_retry_at) > new Date() ? `Waiting for Telegram until ${date(state.reader_retry_at)}.` : state.busy ? (progress?.input_batches ? `Reading batch ${Math.min(progress.completed_batches + 1, progress.input_batches)} of ${progress.input_batches}…` : "Preparing your briefing…") : state.manual_job?.state === "queued" ? "Preview prepared and queued in Telegram." : "A preview arrives in your Telegram chat.";
   $("service-error").hidden = !state.error;
@@ -153,7 +183,20 @@ if (tg?.initData) {
   $("welcome").hidden = true; $("application").hidden = false;
   for (const button of document.querySelectorAll(".tabs button")) button.onclick = () => perform(() => navigate(button.dataset.page));
   $("refresh").onclick = () => perform(refresh, $("refresh"));
-  $("prepare").onclick = () => perform(async () => { const result = await api("digest"); notice(result.message); await refresh(); }, $("prepare"));
+  $("digest-period").onchange = renderDigestPeriod;
+  $("digest-request").onsubmit = (event) => {
+    event.preventDefault();
+    if (state?.busy) return;
+    const period = $("digest-period").value;
+    const payload = period === "recent" ? {} : { period, date: $("digest-date").value };
+    perform(async () => {
+      const result = await api("digest", payload);
+      notice(result.message);
+      await refresh();
+    }, $("prepare")).then(() => { $("prepare").disabled = Boolean(state?.busy); });
+  };
+  const elapsedTimer = setInterval(renderElapsed, 1000);
+  window.addEventListener("pagehide", () => clearInterval(elapsedTimer));
   $("preferences").oninput = () => { dirty = true; };
   $("preferences").onsubmit = (event) => { event.preventDefault(); perform(async () => {
     const split = (id) => $(id).value.split(",").map(v => v.trim()).filter(Boolean);

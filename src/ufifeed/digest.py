@@ -6,6 +6,7 @@ import html
 import json
 import re
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Literal, get_args
 from zoneinfo import ZoneInfo
@@ -459,14 +460,32 @@ class Digests:
     def __init__(self, config: Config, credentials: Credentials, store: Store, reader):
         self.config, self.credentials, self.store, self.reader = config, credentials, store, reader
         self.lock = asyncio.Lock()
+        self.preparation_started_at: str | None = None
+
+    @asynccontextmanager
+    async def preparation(self):
+        async with self.lock:
+            self.preparation_started_at = stamp(utcnow())
+            try:
+                yield
+            finally:
+                self.preparation_started_at = None
 
     async def build(
-        self, start: datetime, end: datetime, *, preview: bool, recipient_id: int | None = None
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        preview: bool,
+        recipient_id: int | None = None,
+        publication_window: bool = False,
     ) -> list[str]:
         source_ids = self.store.selected_sources(recipient_id)
         if recipient_id is not None and not source_ids:
             return []
         rows = [row for row in self.store.candidates(start, end) if row["source_id"] in source_ids]
+        if publication_window:
+            rows = [row for row in rows if start <= parse(row["date"]) < end]
         subscriber = self.store.subscriber(recipient_id) if recipient_id is not None else None
         if subscriber:
             rows = [row for row in rows if parse(row["date"]) >= parse(subscriber["joined_at"])]
@@ -613,8 +632,9 @@ class Digests:
             + "</blockquote>"
         )
 
-    async def manual(self) -> int | None:
-        async with self.lock:
+    async def manual(self, window: tuple[datetime, datetime] | None = None) -> int | None:
+        async with self.preparation():
+            timezone = self.store.get("schedule")["timezone"]
             for attempt in range(3):
                 if await self.reader.sync_all():
                     break
@@ -623,17 +643,20 @@ class Digests:
                 if attempt == 2 or not 0 < delay <= 120:
                     raise DigestError("Collection is incomplete. Check /status and try later.")
                 await asyncio.sleep(delay)
-            end = utcnow()
             signature = self.store.input_signature()
-            start = max(
-                self.store.last_window_end(),
-                end
-                - timedelta(
-                    hours=self.config.telegram.initial_history_hours,
-                ),
-            )
-            start = min(start, end)
-            parts = await self.build(start, end, preview=True)
+            if window is None:
+                end = utcnow()
+                start = max(
+                    self.store.last_window_end(),
+                    end - timedelta(hours=self.config.telegram.initial_history_hours),
+                )
+                start = min(start, end)
+                parts = await self.build(start, end, preview=True)
+            else:
+                if timezone != self.store.get("schedule")["timezone"]:
+                    raise DigestError("The time zone changed. Choose the date again.")
+                start, end = window
+                parts = await self.build(start, end, preview=True, publication_window=True)
             if signature != self.store.input_signature():
                 raise DigestError("Settings changed during preparation. Run /digest again.")
             return self.store.enqueue(
@@ -646,7 +669,7 @@ class Digests:
             )
 
     async def scheduled(self) -> None:
-        async with self.lock:
+        async with self.preparation():
             schedule = Schedule.model_validate(self.store.get("schedule"))
             if not schedule.enabled or not self.store.get("started"):
                 return

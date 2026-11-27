@@ -473,3 +473,33 @@ async def test_channel_topics_are_localized_and_weights_use_observed_history(
     assert parts[1].startswith("<b>AI</b>\n") and "Model release" in parts[1]
     assert all("AI-сводка" not in part for part in parts)
     assert all("<b>Другие новости</b>" not in part for part in parts)
+
+
+async def test_dated_digest_reads_retained_posts_without_advancing_schedule(
+    store, config, credentials, item
+):
+    from datetime import timedelta
+
+    end = utcnow() - timedelta(days=3)
+    start = end - timedelta(days=1)
+    source = -1000000000123
+    store.upsert_live(source, {**item, "date": start, "text": "Inside the requested day"})
+    store.upsert_live(
+        source,
+        {
+            **item,
+            "id": 91,
+            "date": start - timedelta(seconds=1),
+            "edited_at": start,
+            "text": "Earlier item edited during the day",
+        },
+    )
+    reader = SimpleNamespace(sync_all=AsyncMock(return_value=True))
+    digests = Digests(config, credentials, store, reader)
+    window_end = store.last_window_end()
+    await digests.manual((start, end))
+    assert store.last_window_end() == window_end
+    assert digests.preparation_started_at is None
+    payload = store.claim()["payload"]
+    assert "Inside the requested day" in payload
+    assert "Earlier item edited" not in payload

@@ -7,17 +7,19 @@ import json
 import logging
 import re
 import time
+from datetime import date, datetime
 from importlib.resources import files
 from typing import Literal
 from urllib.parse import parse_qsl, urlsplit
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from ufifeed.config import Config, Credentials, Schedule, StrictModel
 from ufifeed.digest import DigestError, message_link
 from ufifeed.store import Store
-from ufifeed.timeutil import stamp, utcnow
+from ufifeed.timeutil import calendar_window, stamp, utcnow
 
 log = logging.getLogger(__name__)
 RECIPIENT = web.RequestKey("recipient_id", int | None)
@@ -79,6 +81,17 @@ class Action(StrictModel):
     revision: str = Field(max_length=100000)
     id: int = 0
     enabled: bool = False
+
+
+class DigestQuery(StrictModel):
+    period: Literal["recent", "day", "week"] = "recent"
+    date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @model_validator(mode="after")
+    def validate_period(self) -> DigestQuery:
+        if (self.period == "recent") != (self.date is None):
+            raise ValueError("A day or week requires a date")
+        return self
 
 
 class JournalQuery(StrictModel):
@@ -280,6 +293,11 @@ class MiniApp:
             "last_ai_input": self.store.get("last_ai_input"),
             "error": self.store.get("digest_error") or self.store.get("folder_error"),
             "manual_job": self.store.get("manual_job"),
+            "preparation_started_at": self.controls.digests.preparation_started_at,
+            "digest_today": utcnow()
+            .astimezone(ZoneInfo(self.store.get("schedule")["timezone"]))
+            .date()
+            .isoformat(),
         }
 
     async def state(self, request):
@@ -325,11 +343,14 @@ class MiniApp:
             result = await self.controls.execute("/ai_folder", "on" if data.enabled else "off")
         return web.json_response({"message": result})
 
-    async def _prepare_digest(self):
+    async def _prepare_digest(self, window: tuple[datetime, datetime] | None):
         self.store.set("digest_error", None)
         self.store.set("manual_job", {"state": "running", "requested_at": stamp(utcnow())})
         try:
-            run_id = await self.controls.digests.manual()
+            if window is None:
+                run_id = await self.controls.digests.manual()
+            else:
+                run_id = await self.controls.digests.manual(window)
             self.store.set("manual_job", {"state": "queued", "run_id": run_id})
             self.store.set("digest_error", None)
         except asyncio.CancelledError:
@@ -343,11 +364,23 @@ class MiniApp:
             self.store.set("manual_job", {"state": "failed"})
 
     async def digest(self, request):
+        query = DigestQuery.model_validate(await request.json() if request.can_read_body else {})
+        window = None
+        if query.period != "recent":
+            try:
+                window = calendar_window(
+                    date.fromisoformat(query.date),
+                    query.period,
+                    self.store.get("schedule")["timezone"],
+                    utcnow(),
+                )
+            except (ValueError, OverflowError):
+                raise web.HTTPBadRequest(text="Choose a valid date in the past or today.") from None
         if self.controls.digests.lock.locked() or (
             self.digest_task and not self.digest_task.done()
         ):
             raise web.HTTPConflict(text="A digest is already being prepared.")
-        self.digest_task = asyncio.create_task(self._prepare_digest(), name="miniapp-digest")
+        self.digest_task = asyncio.create_task(self._prepare_digest(window), name="miniapp-digest")
         return web.json_response(
             {"message": "Preparing a preview for delivery in Telegram."}, status=202
         )
