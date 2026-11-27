@@ -114,3 +114,31 @@ async def test_only_owner_can_add_forwarded_media_channel(store, config, monkeyp
         )
         await controls.handle(message)
     reader.add_forwarded_channel.assert_awaited_once_with(-1000000000123, "example")
+
+
+async def test_invite_message_has_a_working_link_and_manual_join_code(store, config, monkeypatch):
+    import re
+
+    import ufifeed.bot as controls_module
+
+    controls = Controls(config, store, None, None)
+    reply = AsyncMock()
+    monkeypatch.setattr(controls_module, "reply", reply)
+    owner = config.owner.user_id
+    message = SimpleNamespace(
+        text="/invite all",
+        forward_origin=None,
+        from_user=SimpleNamespace(id=owner, is_bot=False),
+        chat=SimpleNamespace(id=owner, type="private"),
+        bot=SimpleNamespace(me=AsyncMock(return_value=SimpleNamespace(username="example_bot"))),
+    )
+    await controls.handle(message)
+    instructions = reply.await_args.args[1]
+    code = re.search(r"(?m)^/join ([A-Za-z0-9_-]{32})$", instructions)[1]
+    assert f"https://t.me/example_bot?start=join_{code}" in instructions
+    assert "tap Start" in instructions
+    assert "/settings" in instructions and "24 hours" in instructions
+    controls.send_settings = AsyncMock()
+    assert "You are subscribed" in await controls.subscriber_command(message, 456, "/join", code)
+    assert store.subscriber(456)
+    assert "already used" in await controls.subscriber_command(message, 789, "/join", code)

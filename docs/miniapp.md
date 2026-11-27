@@ -68,7 +68,7 @@ Back up the VM's encrypted database with its matching key. Replacing the public 
 
 ## Shared digests
 
-In the owner's private bot chat, run `/sources` to see source IDs. Use `/invite ID [ID ...]` to grant access to particular sources, or `/invite all` to grant access to the sources currently in the reader folder. Forward the resulting link to one person. It expires after 24 hours and is consumed when the recipient opens it and taps **Start**.
+In the owner's private bot chat, run `/sources` to see source IDs. Use `/invite ID [ID ...]` to grant access to particular sources, or `/invite all` to grant access to the sources currently in the reader folder. Forward the resulting message to one person. It includes a link and instructions for joining. The recipient can open the link and tap **Start**, or send the included `/join CODE` command in the bot’s private chat. Both methods use the same single-use code, which expires after 24 hours.
 
 Each subscriber receives a digest in their own bot chat on the shared delivery schedule. **Digest settings** and `/subscribe` select from that subscriber's granted active sources. `/language en|ru` changes their digest language. The owner can also choose their own sources using the settings link. Subscriber digests use the owner’s collection and summarization policies and only include posts from their subscription period. New reader sources require a fresh invitation to become available to an existing subscriber.
 

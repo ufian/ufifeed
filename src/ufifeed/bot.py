@@ -133,9 +133,17 @@ class Controls:
                     source_ids = self.parse_sources(argument, None)
                     bot = await message.bot.me()
                     code = self.store.create_invite(source_ids)
+                    bot_url = f"https://t.me/{bot.username}"
                     text = (
-                        "Share this invitation with one person. It expires in 24 hours.\n"
-                        f"https://t.me/{bot.username}?start=join_{code}"
+                        "You're invited to subscribe to Ufifeed digests.\n\n"
+                        f"1. Open {bot_url}?start=join_{code} and tap Start.\n"
+                        "2. Tap Digest settings or send /settings to choose your sources.\n"
+                        "3. Digests will arrive in your private chat with the bot. "
+                        "Send /schedule to see delivery times.\n\n"
+                        f"If the invite link doesn't work, open {bot_url} "
+                        "and send this command in the private chat:\n"
+                        f"/join {code}\n\n"
+                        "This invite can be used once and expires in 24 hours."
                     )
             elif command == "/settings":
                 await self.send_settings(message)
